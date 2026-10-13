@@ -13,6 +13,29 @@ No dependencies (Python 3.10+ stdlib + a browser). Design options & roadmap: [PL
 
 ## Quick start
 
+### Windows (PowerShell)
+
+```powershell
+# Terminal 1 — alice's node
+$env:MW_PEER_ID="alice"; $env:MW_PORT="4001"; $env:MW_DATA="./data/alice"
+python -m mw.node
+
+# Terminal 2 — bob's node (open a second PowerShell window, same folder)
+$env:MW_PEER_ID="bob"; $env:MW_PORT="4002"; $env:MW_DATA="./data/bob"
+python -m mw.node
+```
+
+One-liner variant per terminal (no leftover env vars between runs):
+
+```powershell
+cmd /c "set MW_PEER_ID=alice&& set MW_PORT=4001&& set MW_DATA=.\data\alice&& python -m mw.node"
+```
+
+If `python` isn't found, try `py -m mw.node` (Windows launcher) or `python3`.
+If Python isn't installed: grab it from python.org and tick *"Add to PATH"* in the installer.
+
+### Linux / macOS
+
 ```bash
 # Terminal 1 — alice's node
 MW_PEER_ID=alice MW_PORT=4001 MW_DATA=./data/alice python -m mw.node
@@ -34,6 +57,9 @@ Open http://localhost:4001 and http://localhost:4002 in two browsers.
 
 ```bash
 python3 tests/smoke_test.py
+
+# Windows (PowerShell or cmd):
+python tests\smoke_test.py
 ```
 
 Boots two nodes on ports 4181/4182 (fresh dirs under `data/tA`, `data/tB`) and checks:
