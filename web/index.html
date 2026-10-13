@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeshWall — alpha</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>🧱 MeshWall <span class="tag">alpha</span></h1>
+  <div id="whoami" class="dim"></div>
+  <button id="btn-sync">⟳ Sync peers</button>
+</header>
+
+<main>
+  <!-- Identity -->
+  <section id="identity">
+    <h2>Identity</h2>
+    <div id="id-none">
+      <input id="name" placeholder="display name" maxlength="40">
+      <button id="btn-register">Create local identity</button>
+      <p class="dim">Keys are generated in your browser (WebCrypto Ed25519) and
+      kept in localStorage. Alpha caveat: export/backup not implemented yet.</p>
+    </div>
+    <div id="id-you" hidden>
+      <b id="you-name"></b> <code id="you-id" class="dim small"></code>
+    </div>
+  </section>
+
+  <nav id="tabs">
+    <button data-tab="wall" class="on">Wall</button>
+    <button data-tab="contacts">Contacts</button>
+    <button data-tab="chat">Chat</button>
+    <button data-tab="net">Peers</button>
+  </nav>
+
+  <!-- Wall -->
+  <section id="tab-wall" class="tab">
+    <form id="post-form">
+      <textarea id="post-text" placeholder="What's happening?" rows="2"></textarea>
+      <input type="file" id="post-file" accept="image/*,video/*">
+      <button type="submit">Post to wall</button>
+    </form>
+    <div id="wall"></div>
+  </section>
+
+  <!-- Contacts -->
+  <section id="tab-contacts" class="tab" hidden>
+    <h3>Directory (everyone we've heard of)</h3>
+    <div id="directory"></div>
+    <h3>Your contacts</h3>
+    <ul id="contacts"></ul>
+  </section>
+
+  <!-- Chat -->
+  <section id="tab-chat" class="tab" hidden>
+    <select id="chat-peer"></select>
+    <button id="btn-refresh-chat">refresh</button>
+    <div id="thread"></div>
+    <form id="chat-form">
+      <input id="chat-input" placeholder="message…" autocomplete="off">
+      <button>Send</button>
+    </form>
+    <p class="dim small">Alpha: DMs are signed &amp; replicated via peers, but
+    <b>not encrypted yet</b> (E2EE is Phase 3).</p>
+  </section>
+
+  <!-- Peers -->
+  <section id="tab-net" class="tab" hidden>
+    <h3>This node</h3>
+    <div id="node-info" class="small"></div>
+    <h3>Known peers</h3>
+    <ul id="peerlist"></ul>
+    <form id="peer-form">
+      <input id="peer-url" placeholder="http://other-machine:4002" size="32">
+      <button>Add peer</button>
+    </form>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
