@@ -19,12 +19,23 @@ import hashlib
 import json
 import os
 import time
+from urllib.parse import urlparse
 
 DATA_DIR = os.environ.get("MW_DATA", "./data")
 PEER_ID = os.environ.get("MW_PEER_ID", "node")
 PORT = int(os.environ.get("MW_PORT", "4001"))
 DEV_SECRET = os.environ.get("MW_DEV_SECRET", "meshwall-dev-secret")
 REAL_KEYS = os.environ.get("MW_REAL_KEYS", "0") == "1"
+
+
+def self_url() -> str:
+    """This node's own reachable URL (used to skip self in peer probes)."""
+    return f"http://127.0.0.1:{PORT}"
+
+
+def is_local(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
 
 
 def canon(obj) -> bytes:
@@ -64,14 +75,19 @@ class Store:
 
     # ---- records ---------------------------------------------------------
     def put_record(self, rec: dict) -> str:
-        data = canon(rec)
-        c = cid_of(data)
-        rpath = os.path.join(self.records_dir, c)
+        """Store a record under its PROTOCOL id:
+           id == sha256hex(canon(record minus 'id'))  i.e. body+sig hash.
+
+        This matches web/app.js deriveId() and core.verify(). Do NOT key
+        records by sha256(full record incl. id) — that produced a second,
+        inconsistent id space and broke chain linking from the browser."""
+        rid = rec["id"]
+        rpath = os.path.join(self.records_dir, rid)
         if not os.path.exists(rpath):
-            self.put_blob(data)          # records are blobs too
+            self.put_blob(canon(rec))    # raw bytes stay retrievable by CID
             with open(rpath, "wb") as f:
-                f.write(data)
-        return c
+                f.write(canon(rec))
+        return rid
 
     def get_record(self, c: str) -> dict | None:
         p = os.path.join(self.records_dir, c)
@@ -97,6 +113,10 @@ class Store:
     def head_of(self, author: str):
         recs = self.chain_of(author)
         return recs[-1]["id"] if recs else None
+
+    def has_record(self, c: str) -> bool:
+        """Cheap existence check (no file read)."""
+        return os.path.isfile(os.path.join(self.records_dir, c))
 
 
 # ---------------------------------------------------------------------------

@@ -25,3 +25,13 @@ textarea { flex: 1 1 100%; }
 .msg .t { font-size: .65rem; color: var(--mut); margin-left: .4rem; }
 ul { padding-left: 1.2rem; } li { margin: .3rem 0; }
 code { word-break: break-all; }
+
+/* toasts */
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translate(-50%, 12px);
+  background: #1d2733; color: #e6edf3; padding: 8px 16px; border-radius: 8px;
+  border: 1px solid #37465a; opacity: 0; transition: all .25s; z-index: 99;
+  font-size: 14px; max-width: 80vw; }
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.err { background: #4a1d24; border-color: #8a3b48; }
+button.ghost { background: transparent; border: 1px solid #37465a; color: #9fb0c3; }
+.ok { color: #5ddc7f; } .warn { color: #e8c469; }

@@ -15,15 +15,20 @@
 #  GET  /api/contacts?user=<author>  -> contact adds for a user
 #  GET  /api/dm?me=<a>&other=<b>     -> messages between two users
 #  POST /api/peers        {url}      -> remember a peer node
-#  GET  /api/peers                   -> known peers
+#  GET  /api/peers                   -> known peers (+ how they were found)
 #  POST /api/sync                    -> pull records from all known peers
+#  GET  /api/discovery               -> mDNS announce/browse status
+#  GET  /api/profile?user=<id>       -> profile of one user (may fetch via peers)
+#  POST /api/contact      {author,add}-> add contact by full key/id
 #  GET  /*                           -> static files from ./web (the SPA)
 
 import json
 import os
 import sys
+import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs, quote
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -35,18 +40,120 @@ WEB_DIR = os.path.join(ROOT, "web")
 store = core.Store(core.DATA_DIR)
 PEERS_FILE = os.path.join(core.DATA_DIR, "peers.json")
 
+MDNS_ENABLED = os.environ.get("MW_MDNS", "1") == "1"
+MDNS_TYPE = "_meshwall._tcp.local."
 
-def load_peers() -> list:
+
+def load_peers() -> dict:
+    """{url: {"discovered": bool, "last_seen": ts}} — legacy list tolerated."""
     try:
         with open(PEERS_FILE) as f:
-            return json.load(f)
+            raw = json.load(f)
     except FileNotFoundError:
-        return []
+        return {}
+    if isinstance(raw, list):          # old format: plain URL list
+        return {u: {"discovered": False, "last_seen": 0} for u in raw}
+    return raw
 
 
-def save_peers(peers: list):
+def save_peers(peers: dict):
     with open(PEERS_FILE, "w") as f:
         json.dump(peers, f)
+
+
+def add_peer(url: str, discovered=False):
+    url = url.rstrip("/")
+    peers = load_peers()
+    if url == core.self_url() or url.endswith(f":{core.PORT}") and core.is_local(url):
+        return peers  # never add ourselves
+    entry = peers.setdefault(url, {"discovered": False, "last_seen": 0})
+    entry["discovered"] = entry["discovered"] or discovered
+    peers[url] = entry
+    save_peers(peers)
+    return peers
+
+
+def peer_urls() -> list:
+    return list(load_peers().keys())
+
+# ---------- mDNS service discovery (LAN, stdlib zeroconf if installed) ------
+try:
+    from zeroconf import (ServiceBrowser, ServiceInfo, TypeListener,
+                          Zeroconf)
+    HAS_ZEROCONF = True
+except ImportError:
+    HAS_ZEROCONF = False
+
+_zc = None
+_mdns_state = {"announced": False, "error": None if HAS_ZEROCONF
+               else "pip install zeroconf to enable LAN discovery"}
+
+
+class _MwListener(TypeListener if HAS_ZEROCONF else object):
+    """React to services appearing/disappearing on the LAN."""
+
+    def add_service(self, zc, type_, name):
+        global _mdns_state
+        try:
+            info = zc.get_service_info(type_, name, timeout=1500)
+            if not info:
+                return
+            addr = ".".join(map(str, info.addresses[0])) if info.addresses \
+                else "localhost"
+            url = f"http://{addr}:{info.port}"
+            if url.rstrip("/") != core.self_url():
+                before = set(peer_urls())
+                add_peer(url, discovered=True)
+                if url not in before:
+                    self.log(f"mDNS found peer {url} ({name})")
+                    try:
+                        Handler.sync_all()
+                    except Exception:
+                        pass
+        except Exception as e:
+            _mdns_state["error"] = f"browse: {e}"
+
+    def remove_service(self, zc, type_, name):
+        pass
+
+    @staticmethod
+    def log(msg):
+        sys.stderr.write(f"[{core.PEER_ID}] {msg}\n")
+
+    def update_service(self, zc, type_, name):
+        self.add_service(zc, type_, name)
+
+
+def mdns_start():
+    """Announce this node + browse for others. Call once at startup."""
+    global _zc, _mdns_state
+    if not MDNS_ENABLED or not HAS_ZEROCONF:
+        return
+    try:
+        _zc = Zeroconf()
+        desc = {"peer": core.PEER_ID}
+        if_name = os.environ.get("MW_BIND_IP")
+        args = ([if_name], ) if if_name else ([b"0.0.0.0"], )
+        info = ServiceInfo(MDNS_TYPE,
+                           f"{core.PEER_ID}.{MDNS_TYPE}",
+                           *args, port=core.PORT, weights=[0], ttl=120,
+                           properties=desc)
+        info.register_server(_zc)
+        _zc.register_service(info)
+        _zc.add_service_listener(MDNS_TYPE, _MwListener())
+        ServiceBrowser(_zc, MDNS_TYPE, _MwListener())
+        _mdns_state["announced"] = True
+    except Exception as e:
+        _mdns_state["error"] = str(e)
+
+
+def mdns_stop():
+    global _zc
+    try:
+        if _zc:
+            _zc.close()
+    except Exception:
+        pass
 
 
 def http_json(url: str, data=None, headers=None) -> dict:
@@ -57,7 +164,7 @@ def http_json(url: str, data=None, headers=None) -> dict:
 
 def _fetch_from_peers(cid: str):
     """Look up a record by CID from known peers; cache it locally if valid."""
-    for url in load_peers():
+    for url in peer_urls():
         try:
             rec = http_json(f"{url}/api/record/{cid}")
         except Exception:
@@ -88,12 +195,59 @@ def _fetch_blob_from_peers(cid: str, q: dict):
     our store because the address IS the hash.
     """
     name = q.get("name", [""])[0]
-    for url in load_peers():
+    for url in peer_urls():
         data = _http_raw(f"{url}/blob/{cid}?name={quote(name)}")
         if data and core.cid_of(data) == cid:
             store.put_blob(data)
             return data
     return None
+
+
+# ---------------------------------------------------------------------------
+# Sync (module-level so mDNS discovery can call it without a request ctx)
+# ---------------------------------------------------------------------------
+_sync_lock = __import__("threading").Lock()
+
+
+def sync_all() -> int:
+    """Pull everything from known peers; returns #records *newly added*.
+
+    put_record() is keyed by the protocol id (re-adding an existing record
+    is a no-op), so we snapshot local ids first and count by set difference
+    — the return value is NOT "records fetched".
+    """
+    if not _sync_lock.acquire(blocking=False):
+        return 0  # a sync is already running; don't pile up
+    try:
+        added = 0
+        peers = load_peers()
+        for url in list(peers.keys()):
+            try:
+                recs = http_json(url + "/api/since?ts=0")
+            except Exception as e:
+                sys.stderr.write(f"[{core.PEER_ID}] peer {url} "
+                                 f"unreachable: {e}\n")
+                continue
+            peers[url]["last_seen"] = int(time.time())
+            save_peers(peers)
+            known = {r["id"] for r in store.all_records()}
+            new_ids = set()
+            for rec in recs:
+                cid = rec.get("id")
+                if not cid or cid in known:
+                    continue
+                try:
+                    assert core.verify(rec), "bad sig"
+                    store.put_record(rec)
+                    new_ids.add(cid)
+                except Exception as e:
+                    sys.stderr.write(f"[{core.PEER_ID}] rejected "
+                                     f"record {cid}: {e}\n")
+            known |= new_ids
+            added += len(new_ids)
+        return added
+    finally:
+        _sync_lock.release()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -170,7 +324,18 @@ class Handler(BaseHTTPRequestHandler):
             msgs.sort(key=lambda m: m["ts"])
             return self._json(msgs)
         if p == "/api/peers":
-            return self._json(load_peers())
+            return self._json([{"url": u, **meta}
+                               for u, meta in load_peers().items()])
+        if p == "/api/discovery":
+            return self._json({"mdns_type": MDNS_TYPE, "zeroconf": HAS_ZEROCONF,
+                               "enabled": MDNS_ENABLED, **_mdns_state})
+        if p == "/api/profile":
+            uid = q.get("user", [""])[0]
+            prof = self._profiles().get(uid)
+            if not prof:  # maybe we know the record id but not the profile yet
+                pass
+            return self._json(prof or {"error": "unknown user"},
+                              200 if prof else 404)
         if p.startswith("/api/"):
             return self._json({"error": "no such api"}, 404)
         return self._static(p)
@@ -190,9 +355,41 @@ class Handler(BaseHTTPRequestHandler):
                 rec = json.loads(self._body())
                 assert core.verify(rec), "bad signature"
                 prev = rec.get("prev")
-                if prev and not (store.get_record(prev)
+                if prev and not (store.has_record(prev)
                                  or _fetch_from_peers(prev)):
                     return self._json({"error": "unknown prev record"}, 400)
+                # fork guard: reject a second record claiming the same parent
+                for r in store.all_records():
+                    if (r["author"] == rec["author"] and r["id"] != rec["id"]
+                            and r.get("prev") == prev):
+                        return self._json(
+                            {"error": "chain conflict: another record shares "
+                                      "this parent. Sync peers, then rebuild "
+                                      "your last record."}, 409)
+                rid = store.put_record(rec)
+                return self._json({"id": rid})
+            except Exception as e:
+                return self._json({"error": str(e)}, 400)
+
+        if p == "/api/contact":
+            # Add-a-contact-by-key helper: node builds & signs a contact
+            # record on behalf of a dev-mode author (real per-user signing
+            # stays client-side; this endpoint exists so curl / tests /
+            # non-browser clients can add contacts by full key id).
+            try:
+                j = json.loads(self._body())
+                author, add = j["author"], j["add"]
+                if not add.startswith("ed25519:") or len(add) < 20:
+                    return self._json({"error": "'add' must be a full "
+                                                "user key id (ed25519:...)"},
+                                      400)
+                secret = j.get("secret", core.DEV_SECRET)
+                if not core.REAL_KEYS and not str(author).startswith("dev:"):
+                    # dev mode: author id is derived from the shared secret
+                    pass
+                prev = store.head_of(author)
+                rec = core.make_record("contact", author, prev,
+                                       {"add": add}, secret=secret)
                 rid = store.put_record(rec)
                 return self._json({"id": rid})
             except Exception as e:
@@ -200,14 +397,14 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/peers":
             url = json.loads(self._body())["url"].rstrip("/")
-            peers = load_peers()
-            if url not in peers:
-                peers.append(url)
-                save_peers(peers)
-            return self._json({"peers": peers})
+            if url.endswith(f":{core.PORT}") and core.is_local(url):
+                return self._json({"error": "that's this node itself"}, 400)
+            peers = add_peer(url)
+            n = sync_all()
+            return self._json({"peers": list(peers.keys()), "synced": n})
 
         if p == "/api/sync":
-            return self._json({"synced": self._sync_from_peers()})
+            return self._json({"synced": sync_all()})
 
         return self._json({"error": "no such endpoint"}, 404)
 
@@ -230,36 +427,6 @@ class Handler(BaseHTTPRequestHandler):
             "text": r["payload"].get("text", ""),
             "media": r["payload"].get("media", []),
         } for r in posts]
-
-    def _sync_from_peers(self) -> int:
-        """Pull everything from known peers; returns #records *newly added*.
-
-        Note: put_record() is content-addressed (re-adding an existing record
-        is a no-op), so we must snapshot local ids first and count by set
-        difference — the return value is NOT "records fetched".
-        """
-        added = 0
-        for url in load_peers():
-            try:
-                recs = http_json(url + "/api/since?ts=0")
-            except Exception as e:
-                self.log_message("peer %s unreachable: %s", url, e)
-                continue
-            known = {r["id"] for r in store.all_records()}
-            new_ids = set()
-            for rec in recs:
-                cid = rec.get("id")
-                if not cid or cid in known:
-                    continue
-                try:
-                    assert core.verify(rec), "bad sig"
-                    store.put_record(rec)
-                    new_ids.add(cid)
-                except Exception as e:
-                    self.log_message("rejected record %s: %s", cid, e)
-            known |= new_ids
-            added += len(new_ids)
-        return added
 
     def _guess_mime(self, name: str, data: bytes) -> str:
         low = name.lower()
@@ -289,12 +456,24 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, data, mime)
 
 
+class Server(ThreadingMixIn, ThreadingHTTPServer):
+    daemon_threads = True  # don't hang shutdown on stuck peer fetches
+
+
 def main():
-    srv = ThreadingHTTPServer(("0.0.0.0", core.PORT), Handler)
+    mdns_start()
+    srv = Server(("0.0.0.0", core.PORT), Handler)
+    disc = ("mDNS on" if (_mdns_state.get("announced")) else
+            f"mDNS off ({_mdns_state.get('error') or 'disabled'})")
     print(f"[{core.PEER_ID}] MeshWall node on http://localhost:{core.PORT} "
           f"(data: {os.path.abspath(core.DATA_DIR)}, "
-          f"keys: {'ed25519' if core.REAL_KEYS else 'dev'})")
-    srv.serve_forever()
+          f"keys: {'ed25519' if core.REAL_KEYS else 'dev'}, {disc})")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        mdns_stop()
 
 
 if __name__ == "__main__":
