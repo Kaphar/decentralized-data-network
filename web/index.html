@@ -24,7 +24,9 @@
       kept in localStorage. Alpha caveat: export/backup not implemented yet.</p>
     </div>
     <div id="id-you" hidden>
-      <b id="you-name"></b> <code id="you-id" class="dim small"></code>
+      <b id="you-name"></b>
+      <code id="you-id" class="dim small" title="click to copy full key"
+            style="cursor:pointer"></code>
     </div>
   </section>
 
@@ -47,6 +49,13 @@
 
   <!-- Contacts -->
   <section id="tab-contacts" class="tab" hidden>
+    <h3>Add a contact by key</h3>
+    <form onsubmit="event.preventDefault(); document.getElementById('btn-add-key').click();">
+      <input id="add-key" size="40" placeholder="ed25519:AbC… (paste their full key id)">
+      <button type="button" id="btn-add-key">Add contact</button>
+    </form>
+    <p class="dim small">Your key id is shown in the Identity box — click it to
+    copy. Sharing keys out-of-band (chat, QR…) is how you verify who you add.</p>
     <h3>Directory (everyone we've heard of)</h3>
     <div id="directory"></div>
     <h3>Your contacts</h3>
@@ -70,12 +79,16 @@
   <section id="tab-net" class="tab" hidden>
     <h3>This node</h3>
     <div id="node-info" class="small"></div>
+    <div id="disc-status" class="small"></div>
     <h3>Known peers</h3>
     <ul id="peerlist"></ul>
     <form id="peer-form">
       <input id="peer-url" placeholder="http://other-machine:4002" size="32">
       <button>Add peer</button>
     </form>
+    <p class="dim small">With <code>zeroconf</code> installed, LAN nodes appear
+    here automatically (tagged "auto-discovered"). Without it, add each node's
+    URL once — it's remembered in <code>data/&lt;peer&gt;/peers.json</code>.</p>
   </section>
 </main>
 

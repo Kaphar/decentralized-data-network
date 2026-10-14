@@ -33,6 +33,17 @@ function canonicalJSON(v) {
 // ---------- identity -------------------------------------------------------
 let me = null; // {id, name, privKey (CryptoKey)}
 
+// tiny toast so silent failures become visible (the alpha's #1 debugging win)
+function toast(msg, isError) {
+  let t = document.createElement("div");
+  t.className = "toast" + (isError ? " err" : "");
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.classList.add("show"), 10);
+  setTimeout(() => { t.classList.remove("show");
+                     setTimeout(() => t.remove(), 300); }, 4200);
+}
+
 async function loadIdentity() {
   const raw = localStorage.getItem("mw_identity");
   if (!raw) return;
@@ -41,6 +52,7 @@ async function loadIdentity() {
     const privKey = await crypto.subtle.importKey("pkcs8",
       unb64(s.pkcs8), { name: "Ed25519" }, false, ["sign"]);
     me = { id: s.id, name: s.name, privKey };
+    chainCacheKey = "mw_chain_" + s.id;
   } catch (e) { console.warn("bad stored identity", e); }
 }
 
@@ -52,6 +64,7 @@ async function register(name) {
   const rawPub = new Uint8Array(spki).slice(-32);
   const pkcs8 = b64(await crypto.subtle.exportKey("pkcs8", kp.privateKey));
   me = { id: "ed25519:" + b64(rawPub), name, privKey: kp.privateKey };
+  chainCacheKey = "mw_chain_" + me.id;
   localStorage.setItem("mw_identity",
     JSON.stringify({ id: me.id, name, pkcs8 }));
   // genesis record: profile
@@ -86,11 +99,38 @@ async function api(path, opts = {}) {
   return r.json();
 }
 
+// Head of MY chain = newest record I authored, known to ANY peer we've ever
+// synced with. We keep a durable local cache of my full chain (localStorage)
+// so this survives switching nodes, wiping node data, or clearing caches —
+// losing track of `prev` would otherwise fork the chain and every later
+// post would be rejected ("unknown prev record") => nothing appears on wall.
+let chainCacheKey = "mw_chain";   // rebound to per-identity key in loadIdentity/register
+
+function loadChainCache() {
+  try { return JSON.parse(localStorage.getItem(chainCacheKey)) || []; }
+  catch { return []; }
+}
+function saveChainCache(recs) { localStorage.setItem(chainCacheKey, JSON.stringify(recs)); }
+function rememberMyRecord(body) {
+  const recs = loadChainCache();
+  if (!recs.some(r => r.id === body.id)) recs.push(body);
+  saveChainCache(recs);
+}
+
 async function myHead() {
-  const idx = await api("/api/index");
-  const mine = idx.filter(r => r.author === me.id)
-                  .sort((a, b) => b.ts - a.ts);
-  return mine.length ? mine[0].id : null;
+  let best = null;
+  const consider = (r) => {
+    if (r.author !== me.id) return;
+    if (!best || r.ts > best.ts || (r.ts === best.ts && r.id > best.id)) best = r;
+  };
+  // 1) local chain cache (authoritative for our own history)
+  loadChainCache().forEach(consider);
+  // 2) whatever the current node + its peers know
+  try {
+    const idx = await api("/api/index");
+    idx.forEach(consider);
+  } catch (e) { console.warn("index read failed", e); }
+  return best ? best.id : null;
 }
 
 async function postRecord(type, payload) {
@@ -98,9 +138,33 @@ async function postRecord(type, payload) {
                  ts: Math.floor(Date.now() / 1000), payload };
   body.sig = await signBody(body);            // signs body WITHOUT sig/id
   body.id = await deriveId(body);             // id hashes body+sig
-  return api("/api/record", { method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body) });
+  try {
+    const res = await api("/api/record", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body) });
+    rememberMyRecord(body);
+    return res;
+  } catch (e) {
+    const msg = String(e.message || e);
+    if (msg.includes("chain conflict") || msg.includes("unknown prev")) {
+      // Our cached head is stale (we were offline while another tab/node
+      // extended the chain). Refresh from the network, retry once.
+      try { await doSync(); } catch {}
+      body.prev = await myHead();
+      delete body.sig; delete body.id;
+      body.ts = Math.floor(Date.now() / 1000);
+      body.sig = await signBody(body);
+      body.id = await deriveId(body);
+      const res = await api("/api/record", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body) });
+      rememberMyRecord(body);
+      toast("⟲ retried after chain resync");
+      return res;
+    }
+    toast("❌ " + msg, true);
+    throw e;
+  }
 }
 
 // ---------- views -----------------------------------------------------------
@@ -127,6 +191,7 @@ async function renderContacts() {
     <div class="post"><b>${esc(p.name)}</b> <code class="dim small">${short(id)}</code>
     ${me && id !== me.id && !added.has(id)
       ? `<button onclick="addContact('${esc(id)}')">＋ contact</button>` : ""}
+      <button class="ghost" onclick="copyKey('${esc(id)}')" title="copy full key id">⧉ key</button>
     </div>`).join("") || `<p class="dim">Nobody yet. Sync with peers first.</p>`;
   $("#contacts").innerHTML = (contacts || []).map(c =>
     `<li>${esc(users[c.added]?.name || short(c.added))}
@@ -141,7 +206,34 @@ async function renderContacts() {
 
 window.addContact = async (userId) => {
   await postRecord("contact", { add: userId });
+  toast("✓ contact added");
   refreshAll();
+};
+
+// Add a contact by pasting their FULL key id (ed25519:...). Works even when
+// their profile hasn't synced to this node yet — the contact record only
+// needs the key; the name fills in as soon as we learn it from any peer.
+$("#btn-add-key").onclick = async () => {
+  if (!me) return toast("create an identity first", true);
+  let key = $("#add-key").value.trim();
+  // tolerate bare base64 pubkey without the "ed25519:" prefix
+  if (key && !key.startsWith("ed25519:") && /^[A-Za-z0-9+/=]{40,}$/.test(key))
+    key = "ed25519:" + key;
+  if (!/^ed25519:[A-Za-z0-9+/=]{30,}$/.test(key))
+    return toast("paste a full key id (ed25519:…)", true);
+  if (key === me.id) return toast("that's your own key 🙂", true);
+  const existing = await api("/api/contacts?user=" + encodeURIComponent(me.id));
+  if ((existing || []).some(c => c.added === key))
+    return toast("already a contact");
+  await postRecord("contact", { add: key });
+  $("#add-key").value = "";
+  toast("✓ contact added by key");
+  refreshAll();
+};
+
+window.copyKey = async (id) => {
+  try { await navigator.clipboard.writeText(id); toast("⧉ key copied"); }
+  catch { prompt("copy manually:", id); }
 };
 
 async function renderChat() {
@@ -160,22 +252,36 @@ async function renderChat() {
 }
 
 async function renderPeers() {
-  const [who, peers] = await Promise.all([api("/api/whoami"), api("/api/peers")]);
+  const [who, peers, disc] = await Promise.all([
+    api("/api/whoami"), api("/api/peers"), api("/api/discovery")]);
   $("#node-info").textContent =
     `peer "${who.peer}" on port ${who.port} — serves & replicates blobs/records`;
-  $("#peerlist").innerHTML = peers.map(p => `<li><code>${esc(p)}</code></li>`)
-    .join("") || `<li class="dim">none — add another node's URL</li>`;
+  $("#peerlist").innerHTML = peers.map(p => `<li><code>${esc(p.url)}</code>` +
+    (p.discovered ? ` <span class="tag">auto-discovered</span>` : "") +
+    (p.last_seen ? ` <span class="dim small">seen ${new Date(p.last_seen * 1000).toLocaleTimeString()}</span>` : "") +
+    `</li>`).join("") || `<li class="dim">none yet</li>`;
+  const el = $("#disc-status");
+  if (el) el.innerHTML = disc.announced
+    ? `<span class="ok">● mDNS active</span> — announcing <code>${esc(disc.mdns_type)}</code>; LAN nodes find each other automatically and sync.`
+    : `<span class="warn">○ mDNS off</span> — ${esc(disc.error || "disabled")}. ` +
+      `Run <code>pip install zeroconf</code> before starting the nodes to enable automatic LAN discovery.`;
 }
+
+// background auto-sync: cheap, keeps two open browsers converging without
+// clicking Sync (the 5s poll below only re-reads THIS node's data)
+setInterval(() => { if (me) doSync(true); }, 8000);
 
 async function refreshAll() {
   $("#btn-register").disabled = !!me;
   $("#id-none").hidden = !!me;
   $("#id-you").hidden = !me;
   if (me) { $("#you-name").textContent = me.name;
-            $("#you-id").textContent = me.id.slice(0, 27) + "…"; }
+            const el = $("#you-id");
+            el.textContent = me.id.slice(0, 27) + "…";
+            el.onclick = () => copyKey(me.id); }
   try {
     await Promise.all([renderWall(), renderContacts(), renderChat(), renderPeers()]);
-  } catch (e) { console.error(e); }
+  } catch (e) { console.error(e); toast("⚠ " + e.message, true); }
 }
 
 // ---------- wiring ----------------------------------------------------------
@@ -194,24 +300,33 @@ $("#tabs").addEventListener("click", (e) => {
 
 $("#post-form").onsubmit = async (e) => {
   e.preventDefault();
-  if (!me) return alert("create an identity first");
-  const media = [];
-  const f = $("#post-file").files[0];
-  if (f) {
-    const buf = await f.arrayBuffer();
-    const { cid } = await api("/api/blob", { method: "POST", body: buf });
-    media.push({ cid, mime: f.type || "application/octet-stream" });
+  if (!me) return toast("create an identity first", true);
+  const btn = $("#post-form button[type=submit]");
+  btn.disabled = true; btn.textContent = "posting…";
+  try {
+    const media = [];
+    const f = $("#post-file").files[0];
+    if (f) {
+      const buf = await f.arrayBuffer();
+      const { cid } = await api("/api/blob", { method: "POST", body: buf });
+      media.push({ cid, mime: f.type || "application/octet-stream" });
+    }
+    const text = $("#post-text").value.trim();
+    if (!text && !media.length) return;
+    await postRecord("post", { text, media });
+    $("#post-text").value = ""; $("#post-file").value = "";
+    toast("✓ posted to wall");
+    refreshAll();
+  } catch (e) {
+    console.error(e);            // postRecord already toasted the reason
+  } finally {
+    btn.disabled = false; btn.textContent = "Post to wall";
   }
-  const text = $("#post-text").value.trim();
-  if (!text && !media.length) return;
-  await postRecord("post", { text, media });
-  $("#post-text").value = ""; $("#post-file").value = "";
-  refreshAll();
 };
 
 $("#chat-form").onsubmit = async (e) => {
   e.preventDefault();
-  if (!me) return alert("create an identity first");
+  if (!me) return toast("create an identity first", true);
   const other = $("#chat-peer").value;
   const text = $("#chat-input").value.trim();
   if (!other || !text) return;
@@ -227,21 +342,28 @@ $("#peer-form").onsubmit = async (e) => {
   e.preventDefault();
   const url = $("#peer-url").value.trim();
   if (!url) return;
-  await api("/api/peers", { method: "POST", body: JSON.stringify({ url }) });
-  $("#peer-url").value = "";
-  doSync();
+  try {
+    const res = await api("/api/peers", { method: "POST",
+      body: JSON.stringify({ url }) });
+    $("#peer-url").value = "";
+    toast(`✓ peer added — synced ${res.synced} record(s)`);
+    doSync();
+  } catch (e) { toast("❌ " + e.message, true); }
 };
 
-$("#btn-sync").onclick = doSync;
-async function doSync() {
+$("#btn-sync").onclick = () => doSync(false);
+async function doSync(quiet) {
   const btn = $("#btn-sync");
-  btn.textContent = "⟳ syncing…";
+  if (!quiet) btn.textContent = "⟳ syncing…";
   try {
     const { synced } = await api("/api/sync", { method: "POST" });
-    btn.textContent = `⟳ sync (${synced} new)`;
-    await refreshAll();
-  } catch (e) { btn.textContent = "⟳ sync failed"; console.error(e); }
-  setTimeout(() => (btn.textContent = "⟳ Sync peers"), 2500);
+    if (!quiet) btn.textContent = `⟳ sync (${synced} new)`;
+    if (synced) await refreshAll();
+  } catch (e) {
+    if (!quiet) btn.textContent = "⟳ sync failed";
+    console.error(e);
+  }
+  if (!quiet) setTimeout(() => (btn.textContent = "⟳ Sync peers"), 2500);
 }
 
 // poll lightly so two browsers see each other's posts without manual sync
