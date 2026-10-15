@@ -24,11 +24,13 @@
 
 import json
 import os
+import ssl
 import sys
 import time
+import tempfile
+import ipaddress
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs, quote
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -100,7 +102,7 @@ class _MwListener(TypeListener if HAS_ZEROCONF else object):
                 return
             addr = ".".join(map(str, info.addresses[0])) if info.addresses \
                 else "localhost"
-            url = f"http://{addr}:{info.port}"
+            url = f"{'https' if core.USE_TLS else 'http'}://{addr}:{info.port}"
             if url.rstrip("/") != core.self_url():
                 before = set(peer_urls())
                 add_peer(url, discovered=True)
@@ -156,9 +158,17 @@ def mdns_stop():
         pass
 
 
+_INSECURE_SSL = ssl.create_default_context()
+_INSECURE_SSL.check_hostname = False
+_INSECURE_SSL.verify_mode = ssl.CERT_NONE
+
+
 def http_json(url: str, data=None, headers=None) -> dict:
     req = urllib.request.Request(url, data=data, headers=headers or {})
-    with urllib.request.urlopen(req, timeout=5) as r:
+    kwargs = {}
+    if urlparse(url).scheme == "https":
+        kwargs["context"] = _INSECURE_SSL
+    with urllib.request.urlopen(req, timeout=5, **kwargs) as r:
         return json.loads(r.read())
 
 
@@ -182,7 +192,10 @@ def _fetch_from_peers(cid: str):
 
 def _http_raw(url: str) -> bytes | None:
     try:
-        with urllib.request.urlopen(url, timeout=3) as r:  # short: unknown cid must fail fast
+        kwargs = {}
+        if urlparse(url).scheme == "https":
+            kwargs["context"] = _INSECURE_SSL
+        with urllib.request.urlopen(url, timeout=3, **kwargs) as r:  # short: unknown cid must fail fast
             return r.read()
     except Exception:
         return None
@@ -253,6 +266,33 @@ def sync_all() -> int:
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quieter logs
         sys.stderr.write("[%s] %s\n" % (core.PEER_ID, fmt % args))
+
+    def parse_request(self):
+        # Detect TLS handshake sent to a plain-HTTP port
+        if self.raw_requestline[:1] == b"\x16":
+            sys.stderr.write(
+                f"[{core.PEER_ID}] TLS handshake received on plain HTTP port.\n"
+                f"[{core.PEER_ID}] Start node with MW_TLS=1 for HTTPS, or "
+                f"connect via http:// (not https://).\n")
+            self.close_connection = True
+            return False
+        return super().parse_request()
+
+    def handle_one_request(self):
+        try:
+            return super().handle_one_request()
+        except ssl.SSLError as e:
+            msg = str(e)
+            if "HTTP_REQUEST" in msg or "WRONG_VERSION_NUMBER" in msg:
+                peer_scheme = "https" if self.server.ssl_context \
+                    else "http"
+                sys.stderr.write(
+                    f"[{core.PEER_ID}] Non-{peer_scheme.upper()} request "
+                    f"on {peer_scheme.upper()} port from "
+                    f"{self.client_address[0]} — check peer URL scheme.\n")
+                self.close_connection = True
+                return
+            raise
 
     # ---- helpers ----------------------------------------------------------
     def _send(self, code: int, body: bytes, ctype="application/json"):
@@ -456,16 +496,95 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, data, mime)
 
 
-class Server(ThreadingMixIn, ThreadingHTTPServer):
+class Server(ThreadingHTTPServer):
     daemon_threads = True  # don't hang shutdown on stuck peer fetches
+    ssl_context = None
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        if self.ssl_context is not None:
+            sock = self.ssl_context.wrap_socket(
+                sock, server_side=True, do_handshake_on_connect=False)
+        return sock, addr
+
+
+def _make_ssl_context() -> ssl.SSLContext:
+    """Build an SSLContext from provided cert/key or a fresh self-signed cert."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+
+    if core.TLS_CERT and core.TLS_KEY:
+        ctx.load_cert_chain(core.TLS_CERT, core.TLS_KEY)
+        return ctx
+
+    if core.HAS_CRYPTO:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        import datetime
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = issuer = x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, "meshwall-dev"),
+        ])
+        # Add SANs for 127.0.0.1 + LAN IP so mobile Chrome doesn't block
+        san = x509.SubjectAlternativeName([
+            x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+        ])
+        import socket
+        try:
+            lan_ip = socket.gethostbyname(socket.gethostname())
+            if not lan_ip.startswith("127."):
+                san = x509.SubjectAlternativeName([
+                    x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+                    x509.IPAddress(ipaddress.ip_address(lan_ip)),
+                ])
+        except Exception:
+            pass
+        cert = (x509.CertificateBuilder()
+                .subject_name(subject).issuer_name(issuer)
+                .add_extension(san, critical=False)
+                .public_key(key.public_key())
+                .serial_number(x509.random_serial_number())
+                .not_valid_before(datetime.datetime.now(
+                    datetime.timezone.utc))
+                .not_valid_after(datetime.datetime.now(
+                    datetime.timezone.utc) + datetime.timedelta(days=365))
+                .sign(key, hashes.SHA256()))
+        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+        key_pem = key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption())
+        ctx.load_cert_chain(
+            certfile=_write_temp(cert_pem),
+            keyfile=_write_temp(key_pem))
+        return ctx
+
+    raise RuntimeError(
+        "MW_TLS=1 with no MW_TLS_CERT/MW_TLS_KEY requires "
+        "'cryptography' (pip install cryptography) or use openssl to "
+        "create a cert and pass MW_TLS_CERT/MW_TLS_KEY")
+
+
+def _write_temp(data: bytes) -> str:
+    fd, path = tempfile.mkstemp(suffix=".pem")
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    return path
 
 
 def main():
     mdns_start()
     srv = Server(("0.0.0.0", core.PORT), Handler)
+    if core.USE_TLS:
+        srv.ssl_context = _make_ssl_context()
+        print(f"[{core.PEER_ID}] TLS enabled (self-signed cert, "
+              f"MW_TLS=1)", file=sys.stderr)
     disc = ("mDNS on" if (_mdns_state.get("announced")) else
             f"mDNS off ({_mdns_state.get('error') or 'disabled'})")
-    print(f"[{core.PEER_ID}] MeshWall node on http://localhost:{core.PORT} "
+    scheme = "https" if core.USE_TLS else "http"
+    print(f"[{core.PEER_ID}] MeshWall node on {scheme}://localhost:{core.PORT} "
           f"(data: {os.path.abspath(core.DATA_DIR)}, "
           f"keys: {'ed25519' if core.REAL_KEYS else 'dev'}, {disc})")
     try:

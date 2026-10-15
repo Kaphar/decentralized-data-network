@@ -26,11 +26,15 @@ PEER_ID = os.environ.get("MW_PEER_ID", "node")
 PORT = int(os.environ.get("MW_PORT", "4001"))
 DEV_SECRET = os.environ.get("MW_DEV_SECRET", "meshwall-dev-secret")
 REAL_KEYS = os.environ.get("MW_REAL_KEYS", "0") == "1"
+USE_TLS = os.environ.get("MW_TLS", "0") == "1"
+TLS_CERT = os.environ.get("MW_TLS_CERT", "")
+TLS_KEY = os.environ.get("MW_TLS_KEY", "")
 
 
 def self_url() -> str:
     """This node's own reachable URL (used to skip self in peer probes)."""
-    return f"http://127.0.0.1:{PORT}"
+    scheme = "https" if USE_TLS else "http"
+    return f"{scheme}://127.0.0.1:{PORT}"
 
 
 def is_local(url: str) -> bool:

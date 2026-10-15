@@ -57,19 +57,33 @@ async function loadIdentity() {
 }
 
 async function register(name) {
-  const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true,
-    ["sign", "verify"]);
-  const spki = await crypto.subtle.exportKey("spki", kp.publicKey);
-  // raw 32-byte pubkey = last 32 bytes of SPKI
-  const rawPub = new Uint8Array(spki).slice(-32);
-  const pkcs8 = b64(await crypto.subtle.exportKey("pkcs8", kp.privateKey));
-  me = { id: "ed25519:" + b64(rawPub), name, privKey: kp.privateKey };
-  chainCacheKey = "mw_chain_" + me.id;
-  localStorage.setItem("mw_identity",
-    JSON.stringify({ id: me.id, name, pkcs8 }));
-  // genesis record: profile
-  await postRecord("profile", { name });
-  refreshAll();
+  if (typeof crypto === "undefined" || !crypto.subtle ||
+      location.protocol !== "https:" &&
+      location.hostname !== "localhost" &&
+      location.hostname !== "127.0.0.1" &&
+      location.hostname !== "::1") {
+    toast("HTTPS required on mobile Chrome. Start your node with MW_TLS=1 then " +
+          "open https://" + location.host + " (self-signed, click through)", true);
+    return;
+  }
+  try {
+    const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true,
+      ["sign", "verify"]);
+    const spki = await crypto.subtle.exportKey("spki", kp.publicKey);
+    // raw 32-byte pubkey = last 32 bytes of SPKI
+    const rawPub = new Uint8Array(spki).slice(-32);
+    const pkcs8 = b64(await crypto.subtle.exportKey("pkcs8", kp.privateKey));
+    me = { id: "ed25519:" + b64(rawPub), name, privKey: kp.privateKey };
+    chainCacheKey = "mw_chain_" + me.id;
+    localStorage.setItem("mw_identity",
+      JSON.stringify({ id: me.id, name, pkcs8 }));
+    // genesis record: profile
+    await postRecord("profile", { name });
+    refreshAll();
+  } catch (e) {
+    toast("❌ failed to create identity: " + (e.message || e), true);
+    console.error(e);
+  }
 }
 
 async function signBody(body) {
@@ -340,8 +354,10 @@ $("#chat-peer").onchange = renderChat;
 
 $("#peer-form").onsubmit = async (e) => {
   e.preventDefault();
-  const url = $("#peer-url").value.trim();
+  let url = $("#peer-url").value.trim();
   if (!url) return;
+  const proto = location.protocol;
+  if (!/^https?:\/\//.test(url)) url = proto + "//" + url;
   try {
     const res = await api("/api/peers", { method: "POST",
       body: JSON.stringify({ url }) });
@@ -368,6 +384,17 @@ async function doSync(quiet) {
 
 // poll lightly so two browsers see each other's posts without manual sync
 setInterval(() => { if (me) refreshAll(); }, 5000);
+
+// warn early if WebCrypto won't work (insecure context on mobile)
+if (typeof crypto === "undefined" || !crypto.subtle ||
+    (location.protocol !== "https:" &&
+     location.hostname !== "localhost" &&
+     location.hostname !== "127.0.0.1" &&
+     location.hostname !== "::1")) {
+  toast("⚠ Identity creation needs HTTPS or localhost. " +
+        "This page is served over " + location.protocol + "//" +
+        location.host + " — key generation will fail.", true);
+}
 
 loadIdentity().then(refreshAll);
 api("/api/whoami").then(w => $("#whoami").textContent = `node: ${w.peer}:${w.port}`);

@@ -46,6 +46,28 @@ MW_PEER_ID=bob   MW_PORT=4002 MW_DATA=./data/bob   python -m mw.node
 
 Open http://localhost:4001 and http://localhost:4002 in two browsers.
 
+### Mobile / HTTPS (Android Chrome)
+
+Android Chrome requires a **secure context** (HTTPS or localhost) for WebCrypto to work. On a phone, you can't use `localhost` for a LAN node, so you need the node to serve HTTPS:
+
+```powershell
+# Terminal 1 — alice's node, over HTTPS
+$env:MW_PEER_ID="alice"; $env:MW_PORT="4001"; $env:MW_DATA="./data/alice"; $env:MW_TLS="1"
+python -m mw.node
+```
+
+```bash
+# Linux / macOS
+MW_TLS=1 MW_PEER_ID=alice MW_PORT=4001 MW_DATA=./data/alice python -m mw.node
+```
+
+Then on your phone, open `https://<your-lan-ip>:4001` (e.g. `https://192.168.1.100:4001`). The node generates a self-signed cert on first run — Chrome will show a security warning; click **Advanced → Proceed**.
+
+To use your own cert instead of the auto-generated one:
+```
+MW_TLS=1 MW_TLS_CERT=/path/to/fullchain.pem MW_TLS_KEY=/path/to/key.pem python -m mw.node
+```
+
 ## Workflow (first test run)
 
 1. **Register** on each browser → creates your identity (dev mode: fixed demo id; real Ed25519 keys later, see below).
@@ -75,6 +97,9 @@ decentralized blob fetch + caching, and 404 for unknown CIDs. Ends with `ALL SMO
 | `MW_DATA` | `./data` | Per-node data dir (blobs, records, peers.json) |
 | `MW_DEV_SECRET` | `meshwall-dev-secret` | Shared secret for dev-mode signing — must match across nodes |
 | `MW_REAL_KEYS` | `0` | `1` = real Ed25519 signatures (needs `pip install cryptography`) |
+| `MW_TLS` | `0` | `1` = serve over HTTPS (required for Android Chrome — WebCrypto needs secure context) |
+| `MW_TLS_CERT` | (auto) | Path to TLS cert PEM (overrides auto-generated self-signed) |
+| `MW_TLS_KEY` | (auto) | Path to TLS key PEM (overrides auto-generated self-signed) |
 
 ⚠️ Alpha/dev mode only: dev signing proves *tamper-evidence*, not true per-user identity. Don't use outside a LAN demo until real keys + HTTPS.
 
@@ -105,5 +130,4 @@ data/         runtime state (gitignored) — one folder per node
 
 - mDNS auto-discovery on the LAN (no manual peer entry)
 - WebSocket push instead of polling for chat
-- Real Ed25519 identities generated in-browser (`MW_REAL_KEYS=1` path)
 - Blob replication/pinning policy (what should my node keep?)
