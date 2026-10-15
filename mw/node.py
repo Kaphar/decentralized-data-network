@@ -281,18 +281,29 @@ class Handler(BaseHTTPRequestHandler):
     def handle_one_request(self):
         try:
             return super().handle_one_request()
-        except ssl.SSLError as e:
-            msg = str(e)
-            if "HTTP_REQUEST" in msg or "WRONG_VERSION_NUMBER" in msg:
-                peer_scheme = "https" if self.server.ssl_context \
-                    else "http"
+        except (ssl.SSLError, ConnectionError, BrokenPipeError,
+                OSError) as e:
+            msg = str(e) if isinstance(e, ssl.SSLError) else \
+                getattr(e, "strerror", "") or str(e)
+            if self.server.ssl_context is not None and (
+                    "HTTP_REQUEST" in msg or "WRONG_VERSION_NUMBER" in msg
+                    or "HTTP" in msg or "version" in msg.lower()):
                 sys.stderr.write(
-                    f"[{core.PEER_ID}] Non-{peer_scheme.upper()} request "
-                    f"on {peer_scheme.upper()} port from "
-                    f"{self.client_address[0]} — check peer URL scheme.\n")
+                    f"[{core.PEER_ID}] Non-HTTPS request on HTTPS port from "
+                    f"{self.client_address[0]} — check peer URL scheme\n")
                 self.close_connection = True
                 return
-            raise
+            if self.server.ssl_context is None and "version" in msg.lower():
+                sys.stderr.write(
+                    f"[{core.PEER_ID}] TLS handshake on plain HTTP port — "
+                    f"start with MW_TLS=1 or use http://\n")
+                self.close_connection = True
+                return
+            sys.stderr.write(
+                f"[{core.PEER_ID}] connection error from "
+                f"{self.client_address[0]}: {e}\n")
+            self.close_connection = True
+            return
 
     # ---- helpers ----------------------------------------------------------
     def _send(self, code: int, body: bytes, ctype="application/json"):
