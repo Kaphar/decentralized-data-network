@@ -20,6 +20,7 @@
     <div id="id-none">
       <input id="name" placeholder="display name" maxlength="40">
       <button id="btn-register">Create local identity</button>
+      <button id="btn-manage-identities" class="ghost">Manage identities</button>
       <p class="dim">Keys are generated in your browser (WebCrypto Ed25519) and
       kept in localStorage. Alpha caveat: export/backup not implemented yet.</p>
     </div>
@@ -27,6 +28,10 @@
       <b id="you-name"></b>
       <code id="you-id" class="dim small" title="click to copy full key"
             style="cursor:pointer"></code>
+      <div style="margin-top:0.4rem">
+        <button id="btn-switch-identity" class="ghost">Switch identity</button>
+        <button id="btn-remove-identity">Remove identity</button>
+      </div>
     </div>
   </section>
 

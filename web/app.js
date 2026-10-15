@@ -31,7 +31,117 @@ function canonicalJSON(v) {
 }
 
 // ---------- identity -------------------------------------------------------
+// Multiple identities stored in localStorage under "mw_identities":
+//   { <id>: { id, name, pkcs8 } }
+// Active identity tracked via "mw_active_identity" key.
 let me = null; // {id, name, privKey (CryptoKey)}
+
+
+async function listIdentities() {
+  try {
+    const raw = localStorage.getItem("mw_identities");
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+function saveIdentities(idMap) {
+  localStorage.setItem("mw_identities", JSON.stringify(idMap));
+}
+
+function setActiveIdentity(id) {
+  localStorage.setItem("mw_active_identity", id);
+}
+
+function getActiveIdentityId() {
+  return localStorage.getItem("mw_active_identity");
+}
+
+async function removeIdentity(id) {
+  const idMap = await listIdentities();
+  delete idMap[id];
+  saveIdentities(idMap);
+  const active = getActiveIdentityId();
+  if (active === id) {
+    localStorage.removeItem("mw_active_identity");
+    me = null;
+    chainCacheKey = "mw_chain";
+  }
+  return idMap;
+}
+
+async function switchIdentity(id) {
+  const idMap = await listIdentities();
+  const entry = idMap[id];
+  if (!entry) { toast("identity not found", true); return false; }
+  try {
+    const privKey = await crypto.subtle.importKey(
+      "pkcs8", unb64(entry.pkcs8), { name: "Ed25519" }, false, ["sign"]);
+    me = { id: entry.id, name: entry.name, privKey };
+    chainCacheKey = "mw_chain_" + me.id;
+    setActiveIdentity(me.id);
+    refreshAll();
+    return true;
+  } catch (e) {
+    toast("❌ failed to switch identity: " + (e.message || e), true);
+    return false;
+  }
+}
+
+function showIdentitySwitcher() {
+  listIdentities().then(idMap => {
+    const entries = Object.values(idMap);
+    if (entries.length <= 1) {
+      toast("Only one identity stored. Create another first.", true);
+      return;
+    }
+    const active = getActiveIdentityId();
+    const items = entries.map(e => {
+      const isActive = e.id === active;
+      return `<div style="padding:0.3rem 0">
+        <span style="color:${isActive ? 'var(--acc)' : 'inherit'}">
+          ${isActive ? '● ' : '○ '}${esc(e.name)}</span>
+        <code class="dim small">${short(e.id)}</code>
+        <button class="ghost" style="margin-left:0.4rem"
+          onclick="_switchIdentity('${e.id}')">switch</button>
+        ${!isActive ? `<button class="ghost"
+          onclick="_removeIdentity('${e.id}')">remove</button>` : ""}
+      </div>`;
+    }).join("");
+    const modal = document.createElement("div");
+    modal.id = "identity-switcher";
+    modal.style.cssText = "position:fixed;top:0;left:0;width:100vw;height:100vh;" +
+      "background:rgba(0,0,0,.7);z-index:100;display:flex;align-items:center;" +
+      "justify-content:center";
+    modal.innerHTML = `
+      <div style="background:var(--card);padding:1.5rem;border-radius:12px;max-width:340px">
+        <h3 style="margin:0 0 .8rem">Identities</h3>
+        ${items}
+        <hr style="border-color:#333">
+        <button onclick="document.getElementById('identity-switcher').remove()" class="ghost">Close</button>
+      </div>`;
+    document.body.appendChild(modal);
+  });
+}
+
+window._switchIdentity = async (id) => {
+  const ok = await switchIdentity(id);
+  if (ok) {
+    document.getElementById("identity-switcher")?.remove();
+    toast("✓ switched to " + (me?.name || "identity"));
+  }
+};
+
+window._removeIdentity = async (id) => {
+  await removeIdentity(id);
+  document.getElementById("identity-switcher")?.remove();
+  loadIdentity().then(refreshAll);
+  toast("✓ removed identity");
+};
+
+function switchToIdentity(id) {
+  switchIdentity(id);
+}
+window.switchToIdentity = switchToIdentity;
 
 // tiny toast so silent failures become visible (the alpha's #1 debugging win)
 function toast(msg, isError) {
@@ -45,9 +155,11 @@ function toast(msg, isError) {
 }
 
 async function loadIdentity() {
-  const raw = localStorage.getItem("mw_identity");
-  if (!raw) return;
-  const s = JSON.parse(raw);
+  const activeId = getActiveIdentityId();
+  if (!activeId) return;
+  const idMap = await listIdentities();
+  const s = idMap[activeId];
+  if (!s) return;
   try {
     const privKey = await crypto.subtle.importKey("pkcs8",
       unb64(s.pkcs8), { name: "Ed25519" }, false, ["sign"]);
@@ -75,8 +187,11 @@ async function register(name) {
     const pkcs8 = b64(await crypto.subtle.exportKey("pkcs8", kp.privateKey));
     me = { id: "ed25519:" + b64(rawPub), name, privKey: kp.privateKey };
     chainCacheKey = "mw_chain_" + me.id;
-    localStorage.setItem("mw_identity",
-      JSON.stringify({ id: me.id, name, pkcs8 }));
+    // Store in multi-identity map
+    const idMap = await listIdentities();
+    idMap[me.id] = { id: me.id, name, pkcs8 };
+    saveIdentities(idMap);
+    setActiveIdentity(me.id);
     // genesis record: profile
     await postRecord("profile", { name });
     refreshAll();
@@ -290,15 +405,38 @@ async function refreshAll() {
   $("#id-none").hidden = !!me;
   $("#id-you").hidden = !me;
   if (me) { $("#you-name").textContent = me.name;
-            const el = $("#you-id");
-            el.textContent = me.id.slice(0, 27) + "…";
-            el.onclick = () => copyKey(me.id); }
+             const el = $("#you-id");
+             el.textContent = me.id.slice(0, 27) + "…";
+             el.onclick = () => copyKey(me.id); }
+  // Wire up identity management buttons
+  const mgr = $("#btn-manage-identities");
+  if (mgr) mgr.onclick = showIdentitySwitcher;
+  const sw = $("#btn-switch-identity");
+  if (sw) sw.onclick = showIdentitySwitcher;
+  const rm = $("#btn-remove-identity");
+  if (rm) rm.onclick = removeCurrentIdentity;
   try {
     await Promise.all([renderWall(), renderContacts(), renderChat(), renderPeers()]);
   } catch (e) { console.error(e); toast("⚠ " + e.message, true); }
 }
 
-// ---------- wiring ----------------------------------------------------------
+function switchToIdentity(id) {
+  switchIdentity(id);
+}
+window.switchToIdentity = switchToIdentity;
+
+function removeCurrentIdentity() {
+  if (!me) return;
+  if (!confirm("Remove identity '" + me.name + "'? This cannot be undone.")) return;
+  removeIdentity(me.id).then(() => {
+    me = null;
+    chainCacheKey = "mw_chain";
+    refreshAll();
+    // Also clear any cached chain data for this identity
+    toast("✓ identity removed");
+  });
+}
+window.removeCurrentIdentity = removeCurrentIdentity;
 $("#btn-register").onclick = () => {
   const n = $("#name").value.trim();
   if (n) register(n);
