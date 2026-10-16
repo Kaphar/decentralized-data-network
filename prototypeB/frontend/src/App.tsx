@@ -10,11 +10,12 @@ import type { BaseRecord, IdentityInfo, BlobUploadResponse, SignedRecordResponse
 export default function App() {
   const [records, setRecords] = createSignal<BaseRecord[]>([]);
   const [identity, setIdentity] = createSignal<IdentityInfo | null>(null);
-  const [loading, setLoading] = createSignal(true);
+  const [initialLoad, setInitialLoad] = createSignal(true);
+  const [refreshing, setRefreshing] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
-  async function loadWall() {
-    setLoading(true);
+  async function loadWall(refresh = false) {
+    if (refresh) setRefreshing(true);
     try {
       const posts = await fetchWall();
       setRecords(posts);
@@ -22,7 +23,8 @@ export default function App() {
     } catch (e) {
       setError(String(e));
     } finally {
-      setLoading(false);
+      if (refresh) setRefreshing(false);
+      setInitialLoad(false);
     }
   }
 
@@ -41,9 +43,10 @@ export default function App() {
     const payload = JSON.stringify({ text, media: mediaCids });
     try {
       const signed = await signRecord('post', identity()!.pubkey, null, ts, JSON.parse(payload));
-      const result = await submitRecord(signed);
+      const result =       await submitRecord(signed);
       await loadWall();
     } catch (e) {
+
       setError(String(e));
     }
   }
@@ -62,7 +65,7 @@ export default function App() {
     try {
       const resp = await fetch('/api/sync', { method: 'POST' });
       const data = await resp.json();
-      await loadWall();
+      await loadWall(true);
       return data.added;
     } catch (e) {
       setError(String(e));
@@ -73,7 +76,7 @@ export default function App() {
   createEffect(() => {
     loadIdentity();
     loadWall();
-    const interval = setInterval(loadWall, 5000);
+    const interval = setInterval(() => loadWall(true), 5000);
     onCleanup(() => clearInterval(interval));
   });
 
@@ -101,7 +104,14 @@ export default function App() {
           <PeerManager onSync={handleSync} />
         </aside>
         <section class="feed">
-          {loading() ? <div class="loading">Loading...</div> : <PostList records={records()} />}
+          {initialLoad() ? (
+            <div class="loading">Loading...</div>
+          ) : (
+            <>
+              {refreshing() ? <div class="refresh-indicator">Updating...</div> : null}
+              <PostList records={records()} />
+            </>
+          )}
         </section>
       </main>
 
