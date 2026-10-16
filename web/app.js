@@ -297,24 +297,31 @@ async function postRecord(type, payload) {
 }
 
 // ---------- views -----------------------------------------------------------
-async function renderWall() {
-  const posts = await api("/api/wall");
+let lastWallHash = null;
+let lastUsersHash = null;
+let lastPeersHash = null;
+
+// Only called when wall data changed (checked in refreshAll)
+function renderWallCache(posts) {
   $("#wall").innerHTML = posts.map(p => `
     <div class="post">
       <div class="meta">${esc(p.name)} · ${short(p.author)} ·
         ${new Date(p.ts * 1000).toLocaleString()} ·
         <span title="${esc(p.id)}">cid:${short(p.id)}</span></div>
       <div>${esc(p.text)}</div>
-      ${(p.media || []).map(m => m.mime?.startsWith("video/")
-        ? `<video src="/blob/${m.cid}?name=${m.mime}" controls></video>`
-        : `<img src="/blob/${m.cid}?name=${m.mime}" loading="lazy">`).join("")}
+      ${(p.media || []).map(m => {
+        if (m.mime?.startsWith("video/")) {
+          // Use a data-* attribute for the blob URL so we don't rebuild
+          // the element if it's already rendering with the same source
+          return `<video src="/blob/${m.cid}?name=${m.mime}"
+            controls preload="metadata"></video>`;
+        }
+        return `<img src="/blob/${m.cid}?name=${m.mime}" loading="lazy">`;
+      }).join("")}
     </div>`).join("") || `<p class="dim">Empty wall. Post something!</p>`;
 }
 
-async function renderContacts() {
-  const [users, contacts] = await Promise.all([
-    api("/api/users"),
-    me ? api("/api/contacts?user=" + encodeURIComponent(me.id)) : []]);
+function renderContactsCache(users, contacts) {
   const added = new Set((contacts || []).map(c => c.added));
   $("#directory").innerHTML = Object.entries(users).map(([id, p]) => `
     <div class="post"><b>${esc(p.name)}</b> <code class="dim small">${short(id)}</code>
@@ -380,9 +387,7 @@ async function renderChat() {
   $("#thread").scrollTop = $("#thread").scrollHeight;
 }
 
-async function renderPeers() {
-  const [who, peers, disc] = await Promise.all([
-    api("/api/whoami"), api("/api/peers"), api("/api/discovery")]);
+function renderPeersCache(peers, disc, who) {
   $("#node-info").textContent =
     `peer "${who.peer}" on port ${who.port} — serves & replicates blobs/records`;
   $("#peerlist").innerHTML = peers.map(p => `<li><code>${esc(p.url)}</code>` +
@@ -416,7 +421,30 @@ async function refreshAll() {
   const rm = $("#btn-remove-identity");
   if (rm) rm.onclick = removeCurrentIdentity;
   try {
-    await Promise.all([renderWall(), renderContacts(), renderChat(), renderPeers()]);
+    // Only re-render if data changed - rebuilding DOM destroys <video>/<img> mid-load
+    const [users, wall, peers, disc] = await Promise.all([
+      api("/api/users"), api("/api/wall"), api("/api/peers"), api("/api/discovery"),
+    ]);
+    // Wall - only rebuild if post IDs changed (preserves playing videos)
+    const who = await api("/api/whoami");
+    const wallHash = JSON.stringify(wall.map(p => p.id));
+    if (wallHash !== lastWallHash) {
+      lastWallHash = wallHash;
+      renderWallCache(wall);
+    }
+    // Users directory + contacts
+    const usersHash = JSON.stringify(users);
+    if (usersHash !== lastUsersHash) {
+      lastUsersHash = usersHash;
+      const contacts = me ? await api("/api/contacts?user=" + encodeURIComponent(me.id)) : [];
+      renderContactsCache(users, contacts);
+    }
+    // Peers + discovery status
+    const peersHash = JSON.stringify(peers);
+    if (peersHash !== lastPeersHash) {
+      lastPeersHash = peersHash;
+      renderPeersCache(peers, disc, who);
+    }
   } catch (e) { console.error(e); toast("⚠ " + e.message, true); }
 }
 
