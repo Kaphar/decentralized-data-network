@@ -277,9 +277,18 @@ async function postRecord(type, payload) {
     const msg = String(e.message || e);
     if (msg.includes("chain conflict") || msg.includes("unknown prev")) {
       // Our cached head is stale (we were offline while another tab/node
-      // extended the chain). Refresh from the network, retry once.
+      // extended the chain, or the identity was created on a different node).
+      // Refresh from the network, retry once.
       try { await doSync(); } catch {}
-      body.prev = await myHead();
+      const newPrev = await myHead();
+      const oldPrev = body.prev;
+      if (newPrev === oldPrev) {
+        // Sync didn't bring in anything new - the prev record genuinely
+        // doesn't exist on this node. Start a fresh chain (genesis).
+        body.prev = null;
+      } else {
+        body.prev = newPrev;
+      }
       delete body.sig; delete body.id;
       body.ts = Math.floor(Date.now() / 1000);
       body.sig = await signBody(body);
@@ -288,7 +297,9 @@ async function postRecord(type, payload) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body) });
       rememberMyRecord(body);
-      toast("⟲ retried after chain resync");
+      toast(body.prev === null
+        ? "⟲ retried with fresh chain"
+        : "⟲ retried after chain resync");
       return res;
     }
     toast("❌ " + msg, true);
@@ -301,24 +312,50 @@ let lastWallHash = null;
 let lastUsersHash = null;
 let lastPeersHash = null;
 
-// Only called when wall data changed (checked in refreshAll)
+// Incremental wall render: preserves existing DOM nodes (video elements
+// stay alive) by only adding/removing/reordering as needed.
 function renderWallCache(posts) {
-  $("#wall").innerHTML = posts.map(p => `
-    <div class="post">
-      <div class="meta">${esc(p.name)} · ${short(p.author)} ·
-        ${new Date(p.ts * 1000).toLocaleString()} ·
-        <span title="${esc(p.id)}">cid:${short(p.id)}</span></div>
-      <div>${esc(p.text)}</div>
-      ${(p.media || []).map(m => {
-        if (m.mime?.startsWith("video/")) {
-          // Use a data-* attribute for the blob URL so we don't rebuild
-          // the element if it's already rendering with the same source
-          return `<video src="/blob/${m.cid}?name=${m.mime}"
-            controls preload="metadata"></video>`;
-        }
-        return `<img src="/blob/${m.cid}?name=${m.mime}" loading="lazy">`;
-      }).join("")}
-    </div>`).join("") || `<p class="dim">Empty wall. Post something!</p>`;
+  const wall = $("#wall");
+  // Collect existing posts by id
+  const existing = {};
+  wall.querySelectorAll(".post").forEach(el => {
+    const id = el.dataset.cid;
+    if (id) existing[id] = el;
+  });
+  // Build new DOM (reuse existing elements where possible)
+  const frag = document.createDocumentFragment();
+  if (posts.length === 0) {
+    wall.innerHTML = `<p class="dim">Empty wall. Post something!</p>`;
+    return;
+  }
+  posts.forEach(p => {
+    const existingEl = existing[p.id];
+    if (existingEl) {
+      // Reuse this element (preserves video playback state)
+      frag.appendChild(existingEl);
+    } else {
+      // Create new element
+      const div = document.createElement("div");
+      div.className = "post";
+      div.dataset.cid = p.id;
+      div.innerHTML = `
+        <div class="meta">${esc(p.name)} · ${short(p.author)} ·
+          ${new Date(p.ts * 1000).toLocaleString()} ·
+          <span title="${esc(p.id)}">cid:${short(p.id)}</span></div>
+        <div>${esc(p.text)}</div>
+        ${(p.media || []).map(m => {
+          if (m.mime?.startsWith("video/")) {
+            return `<video src="/blob/${m.cid}?name=${m.mime}"
+              controls preload="metadata"></video>`;
+          }
+          return `<img src="/blob/${m.cid}?name=${m.mime}" loading="lazy">`;
+        }).join("")}`;
+      frag.appendChild(div);
+    }
+  });
+  // Replace wall content in one operation
+  while (wall.firstChild) wall.removeChild(wall.firstChild);
+  wall.appendChild(frag);
 }
 
 function renderContactsCache(users, contacts) {
