@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DDN Prototype B — Workflow</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --card: #1a1d27;
+    --border: #333640;
+    --accent: #4f79f4;
+    --accent2: #7c52f0;
+    --text: #e4e6eb;
+    --muted: #9ca3af;
+    --green: #22c58e;
+    --orange: #f59e0b;
+    --red: #ef4444;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .container { max-width: 960px; margin: 0 auto; padding: 2rem; }
+  header {
+    text-align: center;
+    padding: 3rem 1rem;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: white;
+    margin-bottom: 2rem;
+  }
+  header h1 { font-size: 2.2rem; margin-bottom: 0.5rem; }
+  header p { opacity: 0.9; font-size: 1.1rem; }
+  .section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+  .section h2 {
+    color: var(--accent);
+    font-size: 1.3rem;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.5rem;
+  }
+  .section h3 { color: var(--accent2); margin: 1rem 0 0.5rem; font-size: 1.05rem; }
+  .flow-diagram {
+    display: flex;
+    gap: 1rem;
+    overflow-x: auto;
+    padding: 1rem 0;
+  }
+  .flow-step {
+    flex: 0 0 auto;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    min-width: 160px;
+    text-align: center;
+  }
+  .flow-step .num {
+    display: inline-block;
+    width: 28px;
+    height: 28px;
+    background: var(--accent);
+    border-radius: 50%;
+    color: white;
+    font-weight: bold;
+    line-height: 28px;
+    margin-bottom: 0.5rem;
+  }
+  .arrow {
+    flex: 0 0 auto;
+    align-self: center;
+    color: var(--muted);
+    font-size: 1.5rem;
+  }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { padding: 0.5rem; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--accent); }
+  code {
+    background: var(--bg);
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    font-family: 'Fira Code', monospace;
+    font-size: 0.9rem;
+  }
+  .badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+  .badge-blue { background: rgba(79, 121, 244, 0.2); color: var(--accent); }
+  .badge-purple { background: rgba(124, 82, 240, 0.2); color: var(--accent2); }
+  .badge-green { background: rgba(34, 197, 142, 0.2); color: var(--green); }
+  .badge-orange { background: rgba(245, 158, 11, 0.2); color: var(--orange); }
+  .endpoint {
+    display: inline-block;
+    margin: 0.2rem 0.5rem 0.2rem 0;
+  }
+  .method { font-weight: 700; }
+  .method.get { color: var(--green); }
+  .method.post { color: var(--accent); }
+  .method.put { color: var(--orange); }
+  pre {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    overflow-x: auto;
+    margin: 0.5rem 0;
+  }
+  .highlight { background: rgba(79, 121, 244, 0.1); padding: 0.1rem 0.3rem; border-radius: 3px; }
+  .phase-tag {
+    display: inline-block;
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--orange);
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    margin-left: 0.5rem;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>DDN Prototype B — Workflow</h1>
+  <p>Decentralized Data Network: Rust Node + SolidJS Frontend</p>
+</header>
+
+<div class="container">
+
+  <!-- Overview -->
+  <div class="section">
+    <h2>Overview</h2>
+    <p>
+      Prototype B implements a <span class="highlight">Local Gateway Model</span>: a Rust node handles all
+      P2P networking, cryptography, and storage, while a SolidJS frontend provides the user interface.
+      The browser talks to the local node via HTTP/WebSocket.
+    </p>
+    <div style="margin-top: 1rem;">
+      <span class="badge badge-blue">Rust Backend</span>
+      <span class="badge badge-purple">SolidJS Frontend</span>
+      <span class="badge badge-green">Ed25519 Identity</span>
+      <span class="badge badge-orange">Phase 0</span>
+    </div>
+  </div>
+
+  <!-- Architecture -->
+  <div class="section">
+    <h2>Architecture</h2>
+
+    <h3>Component Layout</h3>
+    <table>
+      <tr><th>Layer</th><th>Component</th><th>Tech</th><th>Responsibility</th></tr>
+      <tr><td>Frontend</td><td>SolidJS App</td><td>TypeScript + Vite</td><td>UI, state, API calls to local node</td></tr>
+      <tr><td>HTTP API</td><td>Axum Router</td><td>Rust + Tokio</td><td>Serves REST endpoints + static files</td></tr>
+      <tr><td>Identity</td><td>Crypto Module</td><td>ed25519-dalek</td><td>Key generation, signing, public key derivation</td></tr>
+      <tr><td>Storage</td><td>Content-Addressed Store</td><td>sha256 + filesystem</td><td>Blob storage by hash, record storage</td></tr>
+      <tr><td>Records</td><td>Record Schema</td><td>serde</td><td>JSON record structs (post, message, profile, contact)</td></tr>
+      <tr><td>P2P</td><td>libp2p Module</td><td>libp2p 0.52</td><td>Phase 0 skeleton — gossipsub, Kademlia, mDNS (future)</td></tr>
+    </table>
+
+    <h3>Data Flow</h3>
+    <div class="flow-diagram">
+      <div class="flow-step"><div class="num">1</div><div>Browser renders SolidJS UI</div></div>
+      <div class="arrow">&#8594;</div>
+      <div class="flow-step"><div class="num">2</div><div>API calls to local node</div></div>
+      <div class="arrow">&#8594;</div>
+      <div class="flow-step"><div class="num">3</div><div>Axum routes request</div></div>
+      <div classdiv class="arrow">
+        <div class="arrow">&#8594;</div>
+      </div>
+      <div class="flow-step"><div class="num">4</div><div>Crypto signs / Storage persists</div></div>
+      <div class="arrow">&#8594;</div>
+      <div class="flow-step"><div class="num">5</div><div>Response back to browser</div></div>
+    </div>
+  </div>
+
+  <!-- Workflow -->
+  <div class="section">
+    <h2>User Workflow</h2>
+
+    <h3>Step 1: Identity & Startup</h3>
+    <p>
+      When the Rust node starts, it generates a random Ed25519 keypair. The public key is
+      used as the user identity (via <span class="highlight">did:key</span>-style CID derivation).
+      The frontend fetches this identity via <span class="badge badge-blue">GET /api/identity</span>.
+    </p>
+    <pre>GET /api/identity
+{"pubkey": "bafz..."}</pre>
+
+    <h3>Step 2: Create a Post (Sign + Submit)</h3>
+    <p>The workflow for creating any record:</p>
+    <ol>
+      <li><strong>Build payload:</strong> Frontend constructs <code>{text, media: [{cid, mime, size}]}</code></li>
+      <li><strong>Sign:</strong> POST to <span class="badge badge-blue">POST /api/record/sign</span> — node signs with its private key
+        and returns a <code>BaseRecord</code> with <code>id, type, author, prev, ts, payload, sig</code></li>
+      <li><strong>Submit:</strong> POST the signed record to <span class="badge badge-blue">POST /api/record</span> — node verifies the
+        signature and stores the record in the CAS</li>
+      <li><strong>Display:</strong> Wall is refreshed by calling <span class="badge badge-green">GET /api/wall</span></li>
+    </ol>
+    <pre>POST /api/record/sign     → {id, type, author, payload, sig, ...}
+POST /api/record          → {id} (accepted)
+GET  /api/wall            → {posts: [BaseRecord, ...]}</pre>
+
+    <h3>Step 3: Upload Media</h3>
+    <p>
+      Files are stored as blobs in the Content-Addressed Store. The blob CID (sha256 hash)
+      is included in post payloads.
+    </p>
+    <pre>POST /api/blob  (raw bytes)
+{"cid": "bafy..."}
+GET  /api/blob/:cid
+{"bytes"}</pre>
+
+    <h3>Step 4: Send Direct Message</h3>
+    <p>
+      DM messages are records with <code>type="message"</code> and a <code>to</code> field
+      in the payload. The UI polls for messages between two identities.
+    </p>
+    <pre>GET /api/dm?me=<myPubkey>&other=<peerPubkey>
+{"messages": [BaseRecord, ...]}</pre>
+
+    <h3>Step 5: Peer Sync</h3>
+    <ol>
+      <li><strong>Add peer:</strong> POST peer URL to <span class="badge badge-blue">POST /api/peers</span></li>
+      <li><strong>Sync:</strong> POST to <span class="badge badge-blue">POST /api/sync</span> — node pulls records from all known peers</li>
+      <li>Each fetched record is <strong>verified</strong> (signature check) before being stored</li>
+    </ol>
+    <pre>POST /api/peers      → {"added": "http://peer:3000"}
+POST /api/sync       → {"added": 3}
+GET  /api/peers      → {"peers": ["..."]}</pre>
+  </div>
+
+  <!-- API Reference -->
+  <div class="section">
+    <h2>API Reference</h2>
+    <table>
+      <tr><th>Method</th><th>Endpoint</th><th>Description</th></tr>
+      <tr><td><span class="method get">GET</span></td><td><span class="endpoint">/api/identity</span></td><td>Node's public key identity</td></tr>
+      <tr><td><span class="method post">POST</span></td><td><span class="endpoint">/api/record/sign</span></td><td>Sign a record (returns signed BaseRecord)</td></tr>
+      <tr><td><span class="method post">POST</span></td><td><span class="endpoint">/api/record</span></td><td>Submit a verified signed record</td></tr>
+      <tr><td><span class="method get">GET</span></td><td><span class="endpoint">/api/record/:id</span></td><td>Fetch record by ID</td></tr>
+      <tr><td><span class="method get">GET</span></td><td><span class="endpoint">/api/records</span></td><td>List all known records</td></tr>
+      <tr><td><span class="method post">POST</span></td><td><span class="endpoint">/api/blob</span></td><td>Upload a binary blob</td></tr>
+      <tr><td><span class="method get">GET</span></td><td><span class="endpoint">/api/blob/:cid</span></td><td>Download a blob by CID</td></tr>
+      <tr><td><span class="method get">GET</span></td><td><span class="endpoint">/api/wall</span></td><td>List all posts</td></tr>
+      <tr><td><span class="method get">GET</span></td><td><span class="endpoint">/api/dm</span></td><td>Filter DM messages between two identities</td></tr>
+      <tr><td><span class="method post">POST</span></td><td><span class="endpoint">/api/peers</span></td><td>Add a peer node URL</td></tr>
+      <tr><td><span class="method get">GET</span></td><td><span class="endpoint">/api/peers</span></td><td>List known peers</td></tr>
+      <tr><td><span class="method post">POST</span></td><td><span class="endpoint">/api/sync</span></td><td>Pull records from all known peers</td></tr>
+    </table>
+  </div>
+
+  <!-- Record Schema -->
+  <div class="section">
+    <h2>Record Schema</h2>
+    <p>All data entities (posts, messages, profiles, contacts) are signed JSON records:</p>
+    <pre>{
+  "id":      "bafy...sha256...",     // hash of canonical JSON
+  "type":    "post | message | profile | contact",
+  "author":  "did:key...",          // public key CID
+  "prev":    "bafy...or null",     // author's previous record
+  "ts":      1728900000,            // unix seconds
+  "payload": { ... },               // entity-specific data
+  "sig":     "base64..."            // Ed25519 signature over id
+}</pre>
+
+    <h3>Payloads by Type</h3>
+    <table>
+      <tr><th>Type</th><th>Payload</th></tr>
+      <tr><td>profile</td><td><code>{"name": "...", "bio": "..."}</code></td></tr>
+      <tr><td>contact</td><td><code>{"add": "did:key..."}</code></td></tr>
+      <tr><td>message</td><td><code>{"to": "did:key...", "text": "..."}</code></td></tr>
+      <tr><td>post</td><td><code>{"text": "...", "media": [{"cid":"...","mime":"..."}]}</code></td></tr>
+    </table>
+  </div>
+
+  <!-- Storage -->
+  <div class="section">
+    <h2>Storage Model</h2>
+    <p>
+      The Content-Addressed Store persists blobs and records to disk under
+      <code>DDN_DATA_DIR/blobs/</code> and <code>DDN_DATA_DIR/records/</code>.
+      Content is addressed by <span class="highlight">sha256</span> hash.
+    </p>
+    <pre>DDN_DATA_DIR/
+├── blobs/
+│   ├── bafyabc123...   ← blob content
+│   └── bafydef456...
+└── records/
+    ├── bafyrec789...   ← JSON record (canonical form)
+    └── bafyrec012...</pre>
+  </div>
+
+  <!-- Development -->
+  <div class="section">
+    <h2>Development</h2>
+    <div style="display: flex; gap: 2rem; flex-wrap: wrap;">
+      <div>
+        <h3 style="color: var(--accent);">Node Backend</h3>
+        <pre>cargo run --release
+cargo check
+cargo test</pre>
+      </div>
+      <div>
+        <h3 style="color: var(--accent2);">Frontend</h3>
+        <pre>npm install
+npm run dev
+npm run build
+npm run typecheck</pre>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>
