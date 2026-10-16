@@ -14,7 +14,7 @@
   "devDependencies": {
     "@types/node": "^20",
     "typescript": "^5",
-    "vite": "^4",
-    "vite-plugin-solid": "^1"
+    "vite": "^5",
+    "vite-plugin-solid": "^2.11.0"
   }
 }
