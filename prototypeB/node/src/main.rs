@@ -96,7 +96,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let frontend_path = std::env::var("DDN_FRONTEND_PATH").unwrap_or_else(|_| "./frontend".to_string());
+    let frontend_path = std::env::var("DDN_FRONTEND_PATH").unwrap_or_else(|_| {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let candidate = PathBuf::from(manifest_dir).join("../frontend");
+        if candidate.join("dist/index.html").exists() {
+            candidate.join("dist").to_string_lossy().to_string()
+        } else if candidate.join("index.html").exists() {
+            candidate.to_string_lossy().to_string()
+        } else {
+            "./frontend".to_string()
+        }
+    });
 
     let app = Router::new()
         .route("/api/blob", post(upload_blob).get(list_blobs))
@@ -125,10 +135,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn serve_frontend() -> impl IntoResponse {
-    let index_path = std::env::var("DDN_FRONTEND_PATH")
-        .unwrap_or_else(|_| "./frontend".to_string());
-    let html = std::fs::read_to_string(format!("{}/index.html", index_path))
-        .unwrap_or_else(|_| "<html><body><h1>Frontend not found</h1></body></html>".to_string());
+    let index_path = std::env::var("DDN_FRONTEND_PATH").unwrap_or_else(|_| {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let candidate = PathBuf::from(manifest_dir).join("../frontend");
+        if candidate.join("dist/index.html").exists() {
+            candidate.join("dist").to_string_lossy().to_string()
+        } else if candidate.join("index.html").exists() {
+            candidate.to_string_lossy().to_string()
+        } else {
+            "./frontend".to_string()
+        }
+    });
+    let path = std::path::PathBuf::from(index_path).join("index.html");
+    let html = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| "<html><body><h1>Frontend not found</h1><p>Run <code>npm run build</code> in <code>prototypeB/frontend/</code> first.</p></body></html>".to_string());
+    info!("Serving frontend from: {}", path.display());
     Html(html)
 }
 
