@@ -1,24 +1,14 @@
-//! P2P networking module - skeleton for Phase 1 libp2p integration.
-//! Phase 0 uses manual peer configuration via HTTP API (see main.rs /api/peers and /api/sync).
+//! P2P networking module.
 //!
-//! Planned Phase 1 features:
-//!   - libp2p Kademlia DHT for peer discovery
-//!   - Gossipsub for real-time record propagation
-//!   - mDNS for local network discovery
-//!   - Identify protocol for peer metadata exchange
+//! Phase 1: real libp2p integration — see [`swarm`]:
+//!   - Gossipsub for real-time record propagation (`ddn/records/v1` topic)
+//!   - Kademlia DHT for peer routing / address discovery
+//!   - mDNS for zero-config local network discovery
+//!   - Identify for peer metadata exchange
+//!
+//! The legacy Phase 0 manual-peer HTTP sync endpoints (`/api/peers`, `/api/sync`)
+//! are still available in `main.rs` as a fallback transport.
 
-use libp2p::PeerId;
+pub mod swarm;
 
-pub struct P2PManager {
-    pub peer_id: PeerId,
-}
-
-impl P2PManager {
-    pub fn new(peer_id: PeerId) -> Self {
-        P2PManager { peer_id }
-    }
-
-    pub fn peer_id(&self) -> &PeerId {
-        &self.peer_id
-    }
-}
+pub use swarm::{spawn_swarm, GossipEvent, P2PCommand, P2PHandle, RECORDS_TOPIC};

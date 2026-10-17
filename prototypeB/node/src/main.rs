@@ -4,19 +4,23 @@ mod records;
 mod storage;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, Query, State,
+    },
     http::StatusCode,
     response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
 };
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 use tower_http::services::ServeDir;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
@@ -27,6 +31,14 @@ struct AppState {
     pub_key: String,
     peers: Arc<RwLock<Vec<String>>>,
     known_records: Arc<RwLock<HashMap<String, records::BaseRecord>>>,
+    p2p: Option<Arc<p2p::P2PHandle>>,
+    events: broadcast::Sender<String>,
+    connected_peers: Arc<RwLock<HashMap<String, Vec<String>>>>,
+}
+
+/// Fan out an event JSON string to all connected browser clients.
+fn emit(state: &AppState, event: serde_json::Value) {
+    let _ = state.events.send(event.to_string());
 }
 
 #[derive(Serialize, Deserialize)]
@@ -83,13 +95,76 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Node public key (author): {}", pub_key);
     info!("Data directory: {}", data_dir);
 
+    // --- libp2p swarm (Phase 1) --------------------------------------------
+    let p2p_port: u16 = std::env::var("DDN_P2P_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4001);
+    let bootstrap_peers: Vec<String> = std::env::var("DDN_BOOTSTRAP_PEERS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let (events_tx, _events_rx0) = broadcast::channel::<String>(256);
+    let connected_peers: Arc<RwLock<HashMap<String, Vec<String>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+
+    let p2p_handle = match p2p::spawn_swarm(&keypair.secret_bytes(), p2p_port, bootstrap_peers).await {
+        Ok(h) => Some(Arc::new(h)),
+        Err(e) => {
+            warn!("libp2p swarm failed to start (falling back to HTTP sync only): {}", e);
+            None
+        }
+    };
+
     let state = Arc::new(AppState {
         store,
         keypair,
         pub_key,
         peers: Arc::new(RwLock::new(Vec::new())),
         known_records: Arc::new(RwLock::new(HashMap::new())),
+        p2p: p2p_handle.clone(),
+        events: events_tx,
+        connected_peers: connected_peers.clone(),
     });
+
+    // --- gossip consumer task: verify -> store -> broadcast to browsers ----
+    if let Some(handle) = p2p_handle {
+        let consumer_state = state.clone();
+        tokio::spawn(async move {
+            let mut rx = handle.events.lock().await;
+            while let Some(ev) = rx.recv().await {
+                let record: records::BaseRecord = match serde_json::from_slice(&ev.data) {
+                    Ok(r) => r,
+                    Err(_) => continue, // not a canonical record — drop
+                };
+                if record.verify().is_err() {
+                    warn!("dropping gossip record with bad signature: {}", record.id);
+                    continue;
+                }
+                let is_new = {
+                    let mut known = consumer_state.known_records.write().await;
+                    if known.contains_key(&record.id) {
+                        false
+                    } else {
+                        let canonical = record.to_canonical_json().unwrap_or_default();
+                        consumer_state.store.put_record(&record.id, canonical.as_bytes()).ok();
+                        known.insert(record.id.clone(), record.clone());
+                        true
+                    }
+                };
+                if is_new {
+                    emit(&consumer_state, json!({
+                        "type": "gossip",
+                        "source": ev.source,
+                        "record": &record,
+                    }));
+                }
+            }
+        });
+    }
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -120,6 +195,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/peers", post(add_peer).get(list_peers))
         .route("/api/sync", post(sync))
         .route("/api/identity", get(get_identity))
+        .route("/api/network", get(network_status))
+        .route("/api/network/connect", post(network_connect))
+        .route("/ws/events", get(ws_events))
         .route("/", get(serve_frontend))
         .nest_service("/static", ServeDir::new(&frontend_path))
         .with_state(state)
@@ -220,6 +298,13 @@ async fn upload_record(
 
     let mut known = state.known_records.write().await;
     known.insert(id.clone(), record.clone());
+    drop(known);
+
+    // Propagate to the mesh over gossipsub (Phase 1).
+    if let Some(p2p) = &state.p2p {
+        p2p.publish_record(canonical.as_bytes().to_vec());
+    }
+    emit(&state, json!({ "type": "record", "record": &record }));
 
     (StatusCode::CREATED, Json(json!({ "id": id })))
 }
@@ -332,6 +417,12 @@ async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn sync(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Trigger a libp2p bootstrap round as well (Phase 1); the legacy manual
+    // HTTP pull below stays as a fallback transport.
+    if let Some(p2p) = &state.p2p {
+        p2p.bootstrap();
+    }
+
     let peers = state.peers.read().await.clone();
 
     let client = reqwest::Client::new();
@@ -369,4 +460,94 @@ async fn sync(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         }
     }
     (StatusCode::OK, Json(SyncResponse { added }))
+}
+// ---------------------------------------------------------------------------
+// Phase 1: network status + WebSocket event stream for browser clients
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ConnectQuery {
+    addr: String,
+}
+
+/// GET /api/network — libp2p swarm status.
+/// POST /api/network/connect?addr=/ip4/.../tcp/.../p2p/... — dial a peer.
+async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match &state.p2p {
+        Some(h) => {
+            let peers = state.connected_peers.read().await;
+            Json(json!({
+                "enabled": true,
+                "peer_id": h.local_peer_id.to_string(),
+                "listen_addrs": h.listen_addrs,
+                "topic": p2p::RECORDS_TOPIC,
+                "connected_peers": peers.keys().collect::<Vec<_>>(),
+                "manual_peers": state.peers.read().await.clone(),
+            }))
+        }
+        None => Json(json!({
+            "enabled": false,
+            "reason": "libp2p swarm not running (HTTP sync fallback only)",
+            "manual_peers": state.peers.read().await.clone(),
+        })),
+    }
+}
+
+async fn network_connect(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ConnectQuery>,
+) -> impl IntoResponse {
+    match state.p2p.as_ref() {
+        Some(h) => match q.addr.parse::<libp2p::Multiaddr>() {
+            Ok(addr) => {
+                h.connect(addr);
+                (StatusCode::OK, Json(json!({ "dialing": q.addr })))
+            }
+            Err(e) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid multiaddr: {}", e) })),
+            ),
+        },
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "libp2p swarm not running" })),
+        ),
+    }
+}
+
+/// GET /ws/events (upgraded) — push channel for browsers: gossip records,
+/// locally created records and peer connect/disconnect notifications.
+async fn ws_events(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws(socket, state))
+}
+
+async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
+    let mut rx = state.events.subscribe();
+    // Welcome message so the client knows the stream is live.
+    let welcome = json!({
+        "type": "hello",
+        "pubkey": state.pub_key,
+        "peer_id": state.p2p.as_ref().map(|h| h.local_peer_id.to_string()),
+    });
+    if socket.send(Message::Text(welcome.to_string())).await.is_err() {
+        return;
+    }
+    loop {
+        tokio::select! {
+            ev = rx.recv() => match ev {
+                Ok(msg) => {
+                    if socket.send(Message::Text(msg)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Err(_)) => break,
+                _ => {} // ignore client pings/text
+            }
+        }
+    }
 }
