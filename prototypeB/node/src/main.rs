@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod crypto;
 mod p2p;
 mod records;
@@ -13,7 +15,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -195,6 +196,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/peers", post(add_peer).get(list_peers))
         .route("/api/sync", post(sync))
         .route("/api/identity", get(get_identity))
+        .route("/api/identity/backup", post(backup_identity))
+        .route("/api/identity/restore", post(restore_identity))
         .route("/api/network", get(network_status))
         .route("/api/network/connect", post(network_connect))
         .route("/ws/events", get(ws_events))
@@ -235,6 +238,62 @@ async fn get_identity(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(json!({
         "pubkey": state.pub_key,
     }))
+}
+
+#[derive(Deserialize)]
+struct BackupRequest {
+    password: String,
+}
+
+async fn backup_identity(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> axum::response::Response {
+    let req: BackupRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid request: {}", e)}))).into_response();
+        }
+    };
+    let file = crypto::create_identity_file(&state.keypair, &req.password);
+    let json_str = match serde_json::to_string(&file) {
+        Ok(s) => s,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("serialization failed: {}", e)}))).into_response();
+        }
+    };
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .header("Content-Disposition", "attachment; filename=ddn_backup.json")
+        .body(axum::body::Body::from(json_str))
+        .unwrap()
+}
+
+#[derive(Deserialize)]
+struct RestoreRequest {
+    file: crypto::IdentityFile,
+    password: String,
+}
+
+async fn restore_identity(body: axum::body::Bytes) -> axum::response::Response {
+    let req: RestoreRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid request: {}", e)}))).into_response();
+        }
+    };
+    match crypto::load_identity_file(&req.file, &req.password) {
+        Ok(kp) => {
+            let file = crypto::create_identity_file(&kp, &req.password);
+            let json_str = serde_json::to_string(&file).unwrap_or_default();
+            axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(json_str))
+                .unwrap()
+        }
+        Err(e) => {
+            (StatusCode::UNAUTHORIZED, Json(json!({"error": e}))).into_response()
+        }
+    }
 }
 
 async fn upload_blob(

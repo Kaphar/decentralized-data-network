@@ -326,3 +326,129 @@ body {
   color: #555;
   font-size: 0.75rem;
 }
+
+.ws-status {
+  background: #143d2d;
+  color: #4ade80;
+  padding: 0.3rem 1rem;
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+.network-view {
+  padding: 1rem;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.network-view h3 {
+  margin-top: 0;
+  color: #fff;
+}
+
+.network-view .info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #222;
+}
+
+.network-view .info-row .label {
+  color: #888;
+  font-size: 0.85rem;
+  min-width: 140px;
+}
+
+.network-view .info-row span {
+  text-align: right;
+  font-size: 0.85rem;
+}
+
+.addr-list,
+.peer-sublist {
+  list-style: none;
+  padding: 0.25rem 0 0 0;
+  margin: 0;
+  font-family: monospace;
+  font-size: 0.8rem;
+}
+
+.addr-list li,
+.peer-sublist li {
+  color: #aaa;
+  word-break: break-all;
+}
+
+.monospace {
+  font-family: 'Monaco', 'Consolas', monospace;
+}
+
+.text-ok { color: #4ade80; }
+.text-warn { color: #fbbf24; }
+
+.btn-tiny {
+  padding: 0.15rem 0.5rem;
+  font-size: 0.75rem;
+  background: #0f0f17;
+  border: 1px solid #2a2a3a;
+  border-radius: 4px;
+  color: #00d4ff;
+  cursor: pointer;
+}
+
+.btn-tiny:hover { opacity: 0.8; }
+
+.key-backup {
+  padding: 1rem;
+  max-width: 400px;
+  margin: 0 auto;
+}
+
+.key-backup h3 {
+  margin-top: 0;
+  color: #fff;
+}
+
+.key-backup .hint {
+  color: #888;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  margin-bottom: 1rem;
+}
+
+.key-backup input[type="password"] {
+  display: block;
+  width: 100%;
+  background: #0f0f17;
+  border: 1px solid #2a2a3a;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  color: #e0e0e0;
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+}
+
+.key-backup input:focus {
+  outline: none;
+  border-color: #00d4ff;
+}
+
+.success-banner {
+  background: #143d1d;
+  color: #4ade80;
+  border: 1px solid #2e7d32;
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin-top: 1rem;
+  font-size: 0.85rem;
+}
+
+.success-banner p {
+  margin: 0.25rem 0;
+}
+
+.success-banner button {
+  margin-top: 0.5rem;
+}

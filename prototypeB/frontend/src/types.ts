@@ -74,3 +74,54 @@ export interface WallResponse {
 export interface DmResponse {
   messages: BaseRecord[];
 }
+
+export interface NetworkStatus {
+  enabled: boolean;
+  peer_id?: string;
+  listen_addrs?: string[];
+  topic?: string;
+  connected_peers?: string[];
+  manual_peers?: string[];
+  reason?: string;
+}
+
+export interface WsHelloEvent {
+  type: 'hello';
+  pubkey: string;
+  peer_id?: string;
+}
+
+export interface WsGossipEvent {
+  type: 'gossip';
+  source: string;
+  record: BaseRecord;
+}
+
+export interface WsRecordEvent {
+  type: 'record';
+  record: BaseRecord;
+}
+
+export type WsEvent = WsHelloEvent | WsGossipEvent | WsRecordEvent;
+
+export interface BackupRequest {
+  password: string;
+}
+
+export interface RestoreRequest {
+  file: IdentityFile;
+  password: string;
+}
+
+export interface IdentityFile {
+  version: number;
+  format: string;
+  pubkey: string;
+  created_ms: number;
+  encrypted: {
+    encrypted_secret: string;
+    salt: string;
+    cipher: string;
+    kdf: { alg: string; iterations: number };
+  };
+}

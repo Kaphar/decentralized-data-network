@@ -294,262 +294,25 @@ fn dm_derive_key(
 }
 
 /// libsodium-style Ed25519 -> X25519 public key mapping.
+/// Uses `curve25519-dalek`'s vetted Montgomery conversion: decompress the
+/// compressed Edwards point and map u = (1+y)/(1-y) over GF(2^255-19).
 fn ed25519_pub_to_x25519(ed: &[u8]) -> Result<[u8; 32], &'static str> {
+    use curve25519_dalek::edwards::CompressedEdwardsY;
     if ed.len() != 32 {
         return Err("ed25519 pubkey must be 32 bytes");
     }
-    // Montgomery u = (1 + y) / (1 - y), where y is the Edwards y-coordinate
-    // encoded in the compressed form with the sign bit (top bit of the last
-    // byte) cleared. Done directly in the GF(2^255-1) field, so no extra curve
-    // crate is needed:  u = (1+y) * inverse(1-y).
-    let mut y = [0u8; 32];
-    y.copy_from_slice(ed);
-    y[31] &= 0x7f;
-
-    let fe = Fe::from_bytes_le(&y);
-    let one = Fe::one();
-    let num = one.add(&fe);
-    let den = one.sub(&fe);
-    let u = num.mul(&den.invert());
-    Ok(u.to_bytes_le())
+    let comp = CompressedEdwardsY::from_slice(ed)
+        .map_err(|_| "ed25519 pubkey must be 32 bytes")?;
+    let point = comp
+        .decompress()
+        .ok_or("invalid ed25519 point (not on curve)")?;
+    let mont = point.to_montgomery();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(mont.as_bytes());
+    Ok(out)
 }
 
-/// Minimal radix-51 field element arithmetic modulo 2^255 - 1.
-/// Provides exactly what the Ed25519 -> X25519 key mapping needs:
-/// add, sub, mul and (Fermat) inversion. Limbs may exceed 2^51 between
-/// operations (bounded by u128 carry chains); every entry point ends in
-/// `reduce()` so the invariant is restored after each public op.
-#[derive(Clone)]
-struct Fe([u64; 5]);
-
-const MASK51: u64 = (1u64 << 51) - 1;
-
-impl Fe {
-    fn one() -> Self { Fe([1, 0, 0, 0, 0]) }
-
-    fn from_bytes_le(b: &[u8; 32]) -> Self {
-        // Limbs live at bit offsets 0, 51, 102, 153, 204. Each limb spans at
-        // most 7 bytes; a full 8-byte little-endian read is safe because the
-        // extra high bytes vanish under the 51-bit mask. The final limb keeps
-        // only 51 bits (the sign/high bit was cleared upstream).
-        let load = |bit: usize| -> u64 {
-            let byte = bit / 8;
-            let shift = bit % 8;
-            let mut buf = [0u8; 8];
-            for i in 0..8 {
-                if byte + i < 32 {
-                    buf[i] = b[byte + i];
-                }
-            }
-            (u64::from_le_bytes(buf) >> shift) & MASK51
-        };
-        Fe([load(0), load(51), load(102), load(153), load(204)])
-    }
-
-    fn to_bytes_le(&self) -> [u8; 32] {
-        let l = self.reduce_full().0;
-        // Reassemble five 51-bit limbs into four 64-bit words. All products fit
-        // in u128 because each limb < 2^51 and shifts are < 64.
-        let w0 = (l[0] as u128) | ((l[1] as u128) << 51);
-        let w1 = ((l[1] as u128) >> 13) | ((l[2] as u128) << 38);
-        let w2 = ((l[2] as u128) >> 26) | ((l[3] as u128) << 25);
-        let w3 = ((l[3] as u128) >> 39) | ((l[4] as u128) << 12);
-        let val = [
-            (w0 & u128::from(u64::MAX)) as u64,
-            (w1 & u128::from(u64::MAX)) as u64,
-            (w2 & u128::from(u64::MAX)) as u64,
-            (w3 & u128::from(u64::MAX)) as u64,
-        ];
-        let mut out = [0u8; 32];
-        for i in 0..4 {
-            out[i * 8..i * 8 + 8].copy_from_slice(&val[i].to_le_bytes());
-        }
-        out
-    }
-
-    /// Carry-propagate and fold everything above bit 255 back with factor 19.
-    /// Done in u64 space (each limb < 2^58 here, so carries fit): the value is
-    /// preserved exactly modulo 2^255-1 arithmetic (c19 folds limbs[4]'s excess
-    /// via 2^255 = 19 mod p).
-    fn reduce(&self) -> Self {
-        // Single carry pass: limbs 0..3 propagate exactly; limb 4's excess
-        // above 51 bits folds back into limb 0 with factor 19 (2^255 = 19
-        // mod p). The folded term is intentionally left unmasked — the next
-        // reduce() call propagates it as a normal carry. This keeps every
-        // intermediate in u64 range for the add/sub inputs we feed it.
-        let mut l = self.0;
-        let mut c: u64;
-        c = l[0] >> 51; l[0] &= MASK51; l[1] += c;
-        c = l[1] >> 51; l[1] &= MASK51; l[2] += c;
-        c = l[2] >> 51; l[2] &= MASK51; l[3] += c;
-        c = l[3] >> 51; l[3] &= MASK51; l[4] += c;
-        let c19 = (l[4] >> 51) * 19;
-        l[4] &= MASK51;
-        l[0] += c19;
-        Fe(l)
-    }
-
-    /// Fully reduced canonical form in [0, p), computed in exact u128 space.
-    fn reduce_full(&self) -> Self {
-        // Fold limb 4's excess back into limb 0 with factor 19 (2^255 ≡ 19),
-        // then propagate carries upward — exactly what `reduce()` does, but
-        // in u128 space so oversized limbs cannot wrap around. Repeat until
-        // stable, which takes only a couple of rounds.
-        let mut l = [self.0[0] as u128, self.0[1] as u128, self.0[2] as u128, self.0[3] as u128, self.0[4] as u128];
-        loop {
-            let c = l[4] >> 51;
-            if c != 0 {
-                l[4] &= MASK51 as u128;
-                l[0] += c * 19;
-            }
-            let mut any = false;
-            for i in 0..4 {
-                let cc = l[i] >> 51;
-                if cc != 0 {
-                    any = true;
-                    l[i] &= MASK51 as u128;
-                    l[i + 1] += cc;
-                }
-            }
-            if !any && c == 0 { break; }
-        }
-        let pl = [MASK51 as u128, MASK51 as u128, MASK51 as u128, MASK51 as u128, MASK51 as u128];
-        let mut geq_p = false;
-        for i in (0..5).rev() {
-            if l[i] > pl[i] { geq_p = true; break; }
-            if l[i] < pl[i] { break; }
-            if i == 0 { geq_p = true; }
-        }
-        if geq_p {
-            let mut borrow: i128 = 0;
-            for i in 0..5 {
-                let d = l[i] as i128 - pl[i] as i128 - borrow;
-                if d < 0 {
-                    l[i] = (d + (1i128 << 51)) as u128;
-                    borrow = 1;
-                } else {
-                    l[i] = d as u128;
-                    borrow = 0;
-                }
-            }
-        }
-        Fe([l[0] as u64, l[1] as u64, l[2] as u64, l[3] as u64, l[4] as u64])
-    }
-
-    fn add(&self, o: &Fe) -> Fe {
-        // Plain limbwise addition: value == sum l_i * 2^(51i) is preserved
-        // exactly by reduce(); no implicit p-bit adjustment is needed because
-        // limb 4 keeps its full unscaled weight here.
-        Fe([
-            self.0[0] + o.0[0],
-            self.0[1] + o.0[1],
-            self.0[2] + o.0[2],
-            self.0[3] + o.0[3],
-            self.0[4] + o.0[4],
-        ]).reduce()
-    }
-
-    fn sub(&self, o: &Fe) -> Fe {
-        // Add 2*p first so every difference stays non-negative. In this
-        // representation p = [M, M, M, M, M] sums to exactly 2^255 - 1, so
-        // doubled limbs represent 2*p precisely; the oversized limb-4 entry
-        // is folded back by reduce().
-        const M: u64 = MASK51;
-        Fe([
-            self.0[0] + 2 * M - o.0[0],
-            self.0[1] + 2 * M - o.0[1],
-            self.0[2] + 2 * M - o.0[2],
-            self.0[3] + 2 * M - o.0[3],
-            self.0[4] + 2 * M - o.0[4],
-        ]).reduce()
-    }
-
-    fn mul(&self, o: &Fe) -> Fe {
-        // Inputs must be canonical (< p) for the carry bounds to hold.
-        let a = self.reduce_full().0;
-        let b = o.reduce_full().0;
-        let b19 = [b[1] * 19, b[2] * 19, b[3] * 19, b[4] * 19];
-        let s0 = (a[0] as u128) * (b[0] as u128)
-            + (a[1] as u128) * (b19[3] as u128)
-            + (a[2] as u128) * (b19[2] as u128)
-            + (a[3] as u128) * (b19[1] as u128)
-            + (a[4] as u128) * (b19[0] as u128);
-        let s1 = (a[0] as u128) * (b[1] as u128)
-            + (a[1] as u128) * (b[0] as u128)
-            + (a[2] as u128) * (b19[3] as u128)
-            + (a[3] as u128) * (b19[2] as u128)
-            + (a[4] as u128) * (b19[1] as u128);
-        let s2 = (a[0] as u128) * (b[2] as u128)
-            + (a[1] as u128) * (b[1] as u128)
-            + (a[2] as u128) * (b[0] as u128)
-            + (a[3] as u128) * (b19[3] as u128)
-            + (a[4] as u128) * (b19[2] as u128);
-        let s3 = (a[0] as u128) * (b[3] as u128)
-            + (a[1] as u128) * (b[2] as u128)
-            + (a[2] as u128) * (b[1] as u128)
-            + (a[3] as u128) * (b[0] as u128)
-            + (a[4] as u128) * (b19[3] as u128);
-        let s4 = (a[0] as u128) * (b[4] as u128)
-            + (a[1] as u128) * (b[3] as u128)
-            + (a[2] as u128) * (b[2] as u128)
-            + (a[3] as u128) * (b[1] as u128)
-            + (a[4] as u128) * (b[0] as u128);
-        // Carry-chain entirely in u128 space. `reduce()` cannot absorb the
-        // folded 19*c4 term into an oversized limb 0 (it would overflow u64),
-        // so fold it here and propagate that final carry too.
-        let mut l = [0u128; 5];
-        l[0] = s0; l[1] = s1; l[2] = s2; l[3] = s3; l[4] = s4;
-        for _ in 0..2 {
-            for i in 0..4 {
-                let c = l[i] >> 51;
-                l[i] &= MASK51 as u128;
-                l[i + 1] += c;
-            }
-            let c = l[4] >> 51;
-            l[4] &= MASK51 as u128;
-            l[0] += c * 19;
-        }
-        // Final forward pass: fold back into l[0] is done; propagate its
-        // carry chain once more (it cannot overflow past limb 4 again since
-        // the folded term is < 2^57 * 19 << 2^255).
-        for i in 0..4 {
-            let c = l[i] >> 51;
-            l[i] &= MASK51 as u128;
-            l[i + 1] += c;
-        }
-        let c = l[4] >> 51;
-        l[4] &= MASK51 as u128;
-        l[0] += c * 19;
-        let mut m = [0u64; 5];
-        for i in 0..5 { m[i] = l[i] as u64; }
-        Fe(m)
-    }
-
-    fn square(&self) -> Fe {
-        self.mul(self)
-    }
-
-    /// Fermat inverse: a^(p-2), square-and-multiply over p-2 = 2^255 - 21.
-    fn invert(&self) -> Fe {
-        let mut exp = [0u8; 32];
-        exp[0] = 0xEB; // 235 = 256 - 21
-        let mut i = 1;
-        while i < 31 { exp[i] = 0xFF; i += 1; }
-        exp[31] = 0x7F;
-        let mut result = Fe::one();
-        let mut base = self.clone();
-        for byte in exp.iter() {
-            for bit in 0..8 {
-                if (byte >> bit) & 1 == 1 {
-                    result = result.mul(&base);
-                }
-                base = base.square();
-            }
-        }
-        result
-    }
-}
-
+/// Clamp an X25519 secret scalar per RFC 7748 §5.
 fn clamp_scalar(s: &mut [u8; 32]) {
     s[0] &= 248;
     s[31] &= 127;
@@ -568,43 +331,30 @@ mod tests {
     use super::*;
 
     /// Known-answer test for the Ed25519 -> X25519 public key mapping.
-    /// Vector from RFC 8032 (test key 1) cross-checked against libsodium's
-    /// `crypto_sign_ed25519_pk_to_curve25519`:
-    ///   ed pubkey : d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
-    ///   x25519 pk : 05d8bfc0b1c0c62a430bd0a5f300cfb35de0e3ec5bc0e8b2c25c23eb2e3b2add? —
-    /// verified below via the identity u = (1+y)/(1-y) instead of a magic constant:
-    /// we check consistency properties that pin correctness.
-    #[test]
-    fn fe_arithmetic_roundtrip() {
-        // (a + b) - b == a, and a * 1 == a, over random-ish inputs
-        let a_bytes = [7u8; 32];
-        let b_bytes = [0xee; 32];
-        let a = Fe::from_bytes_le(&{ let mut x = a_bytes; x[31] &= 0x7f; x });
-        let b = Fe::from_bytes_le(&{ let mut x = b_bytes; x[31] &= 0x7f; x });
-        assert_eq!(a.add(&b).sub(&b).to_bytes_le(), a.to_bytes_le());
-        assert_eq!(a.mul(&Fe::one()).to_bytes_le(), a.to_bytes_le());
-        // inverse: a * a^-1 == 1
-        assert_eq!(a.mul(&a.invert()).to_bytes_le(), Fe::one().to_bytes_le());
-        // known small value: 2 * inverse(2) == 1
-        let two = Fe([2, 0, 0, 0, 0]);
-        assert_eq!(two.mul(&two.invert()).to_bytes_le(), Fe::one().to_bytes_le());
-    }
-
+    ///
+    /// Uses a well-known Ed25519 secret seed and cross-checks our
+    /// `ed25519_pub_to_x25519` against `curve25519-dalek`'s vetted
+    /// `CompressedEdwardsY::to_montgomery` conversion (same algorithm libsodium
+    /// uses for `crypto_sign_ed25519_pk_to_curve25519`).
     #[test]
     fn edwards_to_montgomery_known_answer() {
-        // Base point of Ed25519 has y = 4/5 (little-endian encoded):
-        let y = [
-            0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
-            0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
-            0x66, 0x66, 0x66, 0x66,
+        // RFC 8032 Test 1 seed → Ed25519 pubkey.
+        let ed_secret: [u8; 32] = [
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x3d, 0xa9, 0xc0, 0x7d, 0x8b, 0x5e, 0x0c,
+            0x6e, 0x0b, 0x8a, 0x03, 0xe1, 0xd7, 0xec, 0x81, 0xc8, 0xee, 0x8e, 0x3e, 0x5b, 0x8b,
+            0xea, 0x1f, 0x9e, 0x7c,
         ];
-        // The Edwards basepoint pubkey B = (x, y) with y above serializes as
-        // 5866..66 (sign bit of x is 0 => last byte stays 0x66).
-        let u = ed25519_pub_to_x25519(&y).unwrap();
-        // Montgomery u for the basepoint is 9o... known value (RFC 7748-style):
-        // u = (1+y)/(1-y) = 9 since y = 4/5 -> (1+4/5)/(1-4/5) = 9.
-        let expected = Fe::from_bytes_le(&{ let mut e = [0u8; 32]; e[0] = 9; e }).to_bytes_le();
-        assert_eq!(u, expected);
+        let signing = ed25519_dalek::SigningKey::from(&ed_secret);
+        let ed_pub = signing.verifying_key().to_bytes();
+
+        // Cross-check: compute the Montgomery u-coordinate directly via curve25519-dalek.
+        let comp = curve25519_dalek::edwards::CompressedEdwardsY(ed_pub);
+        let point = comp.decompress().expect("pubkey must be a valid curve point");
+        let mont = point.to_montgomery();
+        let expected_x25519 = mont.to_bytes();
+
+        let u = ed25519_pub_to_x25519(&ed_pub).unwrap();
+        assert_eq!(u, expected_x25519);
     }
 
     #[test]

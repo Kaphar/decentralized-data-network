@@ -19,6 +19,7 @@ tower-http = { version = "0.5", features = ["fs", "cors"] }
 futures = "0.3"
 libp2p = { version = "0.52", features = ["tokio", "gossipsub", "kad", "mdns", "noise", "yamux", "tcp", "dns", "identify", "macros"], default-features = false }
 x25519-dalek = { version = "2", features = ["serde", "static_secrets"] }
+curve25519-dalek = { version = "4", features = ["serde"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
 hmac = "0.12"

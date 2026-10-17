@@ -7,6 +7,9 @@ import type {
   SyncResponse,
   RecordListResponse,
   BaseRecord,
+  NetworkStatus,
+  WsEvent,
+  IdentityFile,
 } from '../types';
 
 const API_BASE = '';
@@ -14,6 +17,19 @@ const API_BASE = '';
 export async function fetchIdentity(): Promise<IdentityInfo> {
   const resp = await fetch(`${API_BASE}/api/identity`);
   if (!resp.ok) throw new Error('Failed to fetch identity');
+  return resp.json();
+}
+
+export async function backupIdentity(password: string): Promise<IdentityFile> {
+  const resp = await fetch(`${API_BASE}/api/identity/backup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error || 'Failed to backup identity');
+  }
   return resp.json();
 }
 
@@ -98,4 +114,70 @@ export async function syncPeers(): Promise<SyncResponse> {
   const resp = await fetch(`${API_BASE}/api/sync`, { method: 'POST' });
   if (!resp.ok) throw new Error('Failed to sync');
   return resp.json();
+}
+
+export function downloadJson(filename: string, json: string) {
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export async function fetchNetworkStatus(): Promise<NetworkStatus> {
+  const resp = await fetch(`${API_BASE}/api/network`);
+  if (!resp.ok) throw new Error('Failed to fetch network status');
+  return resp.json();
+}
+
+export async function connectToPeer(multiaddr: string): Promise<void> {
+  const resp = await fetch(
+    `${API_BASE}/api/network/connect?addr=${encodeURIComponent(multiaddr)}`,
+    { method: 'POST' },
+  );
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error || 'Failed to connect');
+  }
+}
+
+export function subscribeEvents(
+  onEvent: (event: WsEvent) => void,
+  onError?: (err: Event) => void,
+  onClose?: () => void,
+): () => void {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsBase = `${proto}//${window.location.host}`;
+  const ws = new WebSocket(`${wsBase}/ws/events`);
+
+  ws.onopen = () => {
+    console.log('[ws] connected to /ws/events');
+  };
+
+  ws.onmessage = (msg) => {
+    try {
+      const event = JSON.parse(msg.data) as WsEvent;
+      onEvent(event);
+    } catch (e) {
+      console.error('[ws] parse error:', e);
+    }
+  };
+
+  ws.onerror = (err) => {
+    console.error('[ws] error:', err);
+    onError?.(err);
+  };
+
+  ws.onclose = () => {
+    console.log('[ws] disconnected');
+    onClose?.();
+  };
+
+  return () => {
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close();
+    }
+  };
 }

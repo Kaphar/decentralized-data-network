@@ -11,4 +11,4 @@
 
 pub mod swarm;
 
-pub use swarm::{spawn_swarm, GossipEvent, P2PCommand, P2PHandle, RECORDS_TOPIC};
+pub use swarm::{spawn_swarm, P2PHandle, RECORDS_TOPIC};

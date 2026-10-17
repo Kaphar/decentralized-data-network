@@ -88,8 +88,9 @@ fn derive_libp2p_identity(secret: &[u8]) -> identity::Keypair {
     hasher.update(b"ddn-libp2p-ed25519-v1");
     hasher.update(secret);
     let seed: [u8; 32] = hasher.finalize().into();
-    let ed = identity::ed25519::Keypair::try_from_bytes(&mut seed.to_vec())
+    let sk = identity::ed25519::SecretKey::try_from_bytes(seed)
         .expect("valid ed25519 seed");
+    let ed = identity::ed25519::Keypair::from(sk);
     identity::Keypair::from(ed)
 }
 
@@ -271,4 +272,73 @@ pub async fn spawn_swarm(
         local_peer_id,
         listen_addrs: announced,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::Keypair;
+    use crate::records::{BaseRecord, RecordType};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn derive_identity_is_stable() {
+        let secret = Keypair::generate().secret_bytes();
+        let id1 = derive_libp2p_identity(&secret);
+        let id2 = derive_libp2p_identity(&secret);
+        assert_eq!(id1.public(), id2.public(), "identity must be deterministic");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_node_gossip() {
+        let secret_a = Keypair::generate().secret_bytes();
+        let handle_a = spawn_swarm(&secret_a, 4002, vec![]).await.expect("node A swarm");
+
+        // The listen_addrs may not be populated yet (swarm task hasn't polled).
+        // Use the known TCP port to construct the bootstrap multiaddr.
+        let peer_id_a = handle_a.local_peer_id;
+        let bootstrap = format!("/ip4/127.0.0.1/tcp/4002/p2p/{}", peer_id_a);
+
+        let secret_b = Keypair::generate().secret_bytes();
+        let handle_b = spawn_swarm(&secret_b, 4003, vec![bootstrap]).await.expect("node B swarm");
+
+        // Wait for nodes to discover and connect each other.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let kp_a = Keypair::from_bytes(&secret_a).unwrap();
+        let mut record = BaseRecord {
+            id: String::new(),
+            r#type: RecordType::Post,
+            author: crate::crypto::pubkey_to_cid(&kp_a.public_key_bytes()),
+            prev: None,
+            ts: 1728900000,
+            payload: serde_json::json!({ "text": "hello from node A" }),
+            sig: None,
+        };
+        record.sign(&kp_a);
+        let canonical = record.to_canonical_json().unwrap();
+
+        handle_a.publish_record(canonical.as_bytes().to_vec());
+
+        // Poll for the gossip event with an overall timeout.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut received = false;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let mut rx = match handle_b.events.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => continue, // swarm task holds the lock, try again
+            };
+            if let Ok(ev) = rx.try_recv() {
+                if let Ok(r) = serde_json::from_slice::<BaseRecord>(&ev.data) {
+                    if r.id == record.id {
+                        received = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert!(received, "node B did not receive the gossiped record from node A");
+    }
 }
