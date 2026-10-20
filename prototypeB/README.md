@@ -45,6 +45,13 @@ The node serves the frontend automatically from `DDN_FRONTEND_PATH` (defaults to
 | `GET` | `/api/records` | List all known records |
 | `GET` | `/api/wall` | Get all posts (type=post records) |
 | `GET` | `/api/dm?me=<pubkey>&other=<pubkey>` | Filter DM messages between two identities |
+| `POST` | `/api/dm/seal` | Encrypt a DM with X25519+AES-GCM (`{author, to, plaintext}` → `{ciphertext, nonce, ephemeral_pubkey}`) |
+| `POST` | `/api/dm/open` | Decrypt a DM (`{ciphertext, nonce, ephemeral_pubkey, sender}` → `{plaintext}`) |
+| `POST` | `/api/media/offer` | Create a `media_offer` record for WebRTC file transfer |
+| `POST` | `/api/media/accept` | Create a `media_accept` record in response to a media offer |
+| `POST` | `/api/media/keypair` | Generate an ephemeral X25519 keypair for WebRTC signaling |
+| `POST` | `/api/report` | Publish a `report` record flagging content (`{target_cid, reason}`) |
+| `GET` | `/api/moderation` | Get blocked/hidden CIDs and trusted moderator pubkeys |
 | `POST` | `/api/peers` | Add a peer node (`{url: "http://host:port"}`) |
 | `GET` | `/api/peers` | List known peers |
 | `POST` | `/api/sync` | Pull records from all known peers |

@@ -326,6 +326,19 @@ pub fn pubkey_to_cid(pubkey: &[u8]) -> String {
 pub fn cid_to_pubkey(cid: &str) -> Result<Vec<u8>, &'static str> {
     hex::decode(cid).map_err(|_| "invalid pubkey hex")
 }
+
+/// Generate an ephemeral X25519 keypair for WebRTC media signaling.
+/// Returns (pubkey_hex, secret_hex). The secret is returned so the frontend
+/// can participate in the WebRTC handshake; it should be discarded after use.
+pub fn generate_x25519_keypair() -> (String, String) {
+    use x25519_dalek::{PublicKey, StaticSecret};
+    let mut secret_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut secret_bytes);
+    let secret = StaticSecret::from(secret_bytes);
+    let pubkey = PublicKey::from(&secret);
+    (hex::encode(pubkey.to_bytes()), hex::encode(secret_bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -24,6 +24,7 @@ export interface MediaRef {
   cid: string;
   mime: string;
   size: number;
+  isOffer?: boolean;
 }
 
 export interface IdentityInfo {
@@ -102,7 +103,13 @@ export interface WsRecordEvent {
   record: BaseRecord;
 }
 
-export type WsEvent = WsHelloEvent | WsGossipEvent | WsRecordEvent;
+export interface WsWebrtcSignalEvent {
+  type: 'webrtc_signal';
+  source: string;
+  data: string;
+}
+
+export type WsEvent = WsHelloEvent | WsGossipEvent | WsRecordEvent | WsWebrtcSignalEvent;
 
 export interface BackupRequest {
   password: string;
@@ -124,4 +131,50 @@ export interface IdentityFile {
     cipher: string;
     kdf: { alg: string; iterations: number };
   };
+}
+
+export interface SealDmRequest {
+  author: string;
+  to: string;
+  plaintext: string;
+}
+
+export interface SealDmResponse {
+  ciphertext: string;
+  nonce: string;
+  ephemeral_pubkey: string;
+}
+
+export interface OpenDmRequest {
+  ciphertext: string;
+  nonce: string;
+  ephemeral_pubkey: string;
+  sender: string;
+}
+
+export interface OpenDmResponse {
+  plaintext: string;
+}
+
+export interface MediaOfferRequest {
+  to: string;
+  file_name: string;
+  size_bytes: number;
+  ephemeral_pubkey: string;
+}
+
+export interface MediaAcceptRequest {
+  offer_cid: string;
+  ephemeral_pubkey: string;
+}
+
+export interface ReportRequest {
+  target_cid: string;
+  reason: string;
+}
+
+export interface ModActionRequest {
+  target_cid: string;
+  action: 'hide' | 'nuke';
+  mod_pubkey: string;
 }

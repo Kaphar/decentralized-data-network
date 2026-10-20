@@ -1,5 +1,4 @@
-import { Component, createSignal, createEffect } from 'solid-js';
-import { For } from 'solid-js';
+import { Component, createSignal, createEffect, Show, For } from 'solid-js';
 import type { BaseRecord } from '../types';
 
 export interface ChatProps {
@@ -11,11 +10,16 @@ export const Chat: Component<ChatProps> = (props) => {
   const [message, setMessage] = createSignal('');
   const [recipient, setRecipient] = createSignal('');
   const [messages, setMessages] = createSignal<BaseRecord[]>([]);
+  const [sending, setSending] = createSignal(false);
+  const [decryptionError, setDecryptionError] = createSignal<string | null>(null);
 
   const loadMessages = async () => {
     if (!recipient()) return;
+    setDecryptionError(null);
     try {
-      const resp = await fetch(`/api/dm?me=${props.currentPubKey}&other=${recipient()}`);
+      const resp = await fetch(
+        `/api/dm?me=${props.currentPubKey}&other=${recipient()}`,
+      );
       if (resp.ok) {
         const data = await resp.json();
         setMessages(data.messages);
@@ -27,14 +31,30 @@ export const Chat: Component<ChatProps> = (props) => {
 
   const sendMessage = async () => {
     if (!message().trim() || !recipient()) return;
-    const ts = Date.now();
-    const payload = {
-      to: recipient(),
-      ciphertext: btoa(message()),
-      nonce: btoa('nonce-placeholder'),
-      ephemeral_pubkey: '',
-    };
+    setSending(true);
     try {
+      const sealed = await fetch('/api/dm/seal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          author: props.currentPubKey,
+          to: recipient(),
+          plaintext: message(),
+        }),
+      });
+      if (!sealed.ok) {
+        const err = await sealed.json();
+        throw new Error(err.error || 'Failed to encrypt message');
+      }
+      const { ciphertext, nonce, ephemeral_pubkey } = await sealed.json();
+
+      const payload = {
+        to: recipient(),
+        ciphertext,
+        nonce,
+        ephemeral_pubkey,
+      };
+
       const resp = await fetch('/api/record/sign', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -42,7 +62,7 @@ export const Chat: Component<ChatProps> = (props) => {
           type: 'message',
           author: props.currentPubKey,
           prev: null,
-          ts,
+          ts: Date.now(),
           payload,
         }),
       });
@@ -58,6 +78,43 @@ export const Chat: Component<ChatProps> = (props) => {
       }
     } catch (e) {
       console.error('Failed to send message:', e);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const decryptMessage = async (record: BaseRecord): Promise<string> => {
+    const p = record.payload as Record<string, unknown>;
+    const ciphertext = (p.ciphertext as string) ?? '';
+    const nonce = (p.nonce as string) ?? '';
+    const ephemeralPubkey = (p.ephemeral_pubkey as string) ?? '';
+    const sender = record.author;
+
+    if (!ciphertext || !nonce || !ephemeralPubkey) {
+      return '';
+    }
+
+    try {
+      const resp = await fetch('/api/dm/open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ciphertext,
+          nonce,
+          ephemeral_pubkey: ephemeralPubkey,
+          sender,
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json();
+        throw new Error(err.error || 'Decryption failed');
+      }
+      const data = await resp.json();
+      return data.plaintext;
+    } catch (e) {
+      console.error('Failed to decrypt message:', e);
+      setDecryptionError(String(e));
+      return '[encrypted — unable to decrypt]';
     }
   };
 
@@ -66,6 +123,9 @@ export const Chat: Component<ChatProps> = (props) => {
       loadMessages();
     }
   });
+
+  const sortedMessages = () =>
+    messages().sort((a, b) => a.ts - b.ts);
 
   return (
     <div class="chat-container">
@@ -77,21 +137,25 @@ export const Chat: Component<ChatProps> = (props) => {
           placeholder="Recipient pubkey"
         />
       </div>
+
       <div class="chat-messages">
-        <For each={messages()} fallback={<div>No messages</div>}>
-          {(msg) => {
-            const p = msg.payload as Record<string, unknown>;
-            let decoded = (p.ciphertext as string) ?? '';
-            try { decoded = atob(decoded); } catch {}
-            return (
-              <div class="chat-message">
-                <div class="sender">{msg.author.slice(0, 8)}...</div>
-                <div class="text">{decoded}</div>
-              </div>
-            );
-          }}
+        <For each={sortedMessages()} fallback={<div>No messages</div>}>
+          {(msg) => (
+            <MessageBubble
+              msg={msg}
+              isOwn={msg.author === props.currentPubKey}
+              onDecrypt={decryptMessage}
+            />
+          )}
         </For>
       </div>
+
+      <Show when={decryptionError()}>
+        <div class="error-banner" style={{ "font-size": "0.8rem" }}>
+          {decryptionError()}
+        </div>
+      </Show>
+
       <div class="chat-input">
         <input
           type="text"
@@ -99,10 +163,39 @@ export const Chat: Component<ChatProps> = (props) => {
           oninput={(e) => setMessage((e.target as HTMLInputElement).value)}
           placeholder="Type a message..."
         />
-        <button class="btn btn-secondary" onclick={sendMessage} disabled={!message().trim() || !recipient()}>
-          Send
+        <button
+          class="btn btn-secondary"
+          onclick={sendMessage}
+          disabled={!message().trim() || !recipient() || sending()}
+        >
+          {sending() ? 'Sending...' : 'Send'}
         </button>
       </div>
+    </div>
+  );
+};
+
+// Render a single decrypted message. Uses a child component so each message
+// can independently run its async decryption without blocking the list.
+const MessageBubble: Component<{
+  msg: BaseRecord;
+  isOwn: boolean;
+  onDecrypt: (record: BaseRecord) => Promise<string>;
+}> = (props) => {
+  const [plaintext, setPlaintext] = createSignal('[decrypting…]');
+  const [decrypted, setDecrypted] = createSignal(false);
+
+  createEffect(() => {
+    props.onDecrypt(props.msg).then((result) => {
+      setPlaintext(result);
+      setDecrypted(true);
+    });
+  });
+
+  return (
+    <div class="chat-message">
+      <div class="sender">{props.isOwn ? 'you' : props.msg.author.slice(0, 8) + '…'}</div>
+      <div class="text">{plaintext()}</div>
     </div>
   );
 };

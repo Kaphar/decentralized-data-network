@@ -10,6 +10,8 @@ import type {
   NetworkStatus,
   WsEvent,
   IdentityFile,
+  SealDmResponse,
+  OpenDmResponse,
 } from '../types';
 
 const API_BASE = '';
@@ -141,6 +143,135 @@ export async function connectToPeer(multiaddr: string): Promise<void> {
     const err = await resp.json();
     throw new Error(err.error || 'Failed to connect');
   }
+}
+
+export async function sealDm(
+  author: string,
+  to: string,
+  plaintext: string,
+): Promise<SealDmResponse> {
+  const resp = await fetch(`${API_BASE}/api/dm/seal`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ author, to, plaintext }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error || 'Failed to encrypt DM');
+  }
+  return resp.json();
+}
+
+export async function openDm(
+  ciphertext: string,
+  nonce: string,
+  ephemeral_pubkey: string,
+  sender: string,
+): Promise<string> {
+  const resp = await fetch(`${API_BASE}/api/dm/open`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ciphertext, nonce, ephemeral_pubkey, sender }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error || 'Failed to decrypt DM');
+  }
+  const data: OpenDmResponse = await resp.json();
+  return data.plaintext;
+}
+
+export async function sendMediaOffer(
+  to: string,
+  file_name: string,
+  size_bytes: number,
+  ephemeral_pubkey: string,
+): Promise<{ id: string }> {
+  const resp = await fetch(`${API_BASE}/api/media/offer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: to, file_name, size_bytes, ephemeral_pubkey }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error || 'Failed to send media offer');
+  }
+  return resp.json();
+}
+
+export async function sendMediaAccept(
+  offer_cid: string,
+  ephemeral_pubkey: string,
+): Promise<{ id: string }> {
+  const resp = await fetch(`${API_BASE}/api/media/accept`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ offer_cid, ephemeral_pubkey }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error || 'Failed to send media accept');
+  }
+  return resp.json();
+}
+
+export interface WebrtcSignalRequest {
+  payload: string;
+}
+
+export interface WebrtcSignalPayload {
+  type: 'offer' | 'answer' | 'candidate';
+  role: 'sender' | 'receiver';
+  target: string;
+  session_id: string;
+  data: string;
+}
+
+export async function sendWebrtcSignal(payload: WebrtcSignalPayload): Promise<void> {
+  const resp = await fetch(`${API_BASE}/api/webrtc/signal`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ payload: btoa(JSON.stringify(payload)) }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error || 'Failed to send signal');
+  }
+}
+
+export interface MediaKeypair {
+  pubkey: string;
+  secret: string;
+}
+
+export async function reportContent(target_cid: string, reason: string): Promise<{ id: string }> {
+  const resp = await fetch(`${API_BASE}/api/report`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target_cid, reason }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error || 'Failed to report content');
+  }
+  return resp.json();
+}
+
+export async function fetchModerationList(): Promise<{ blocked_cids: string[]; hidden_cids: string[]; mod_pubkeys: string[] }> {
+  const resp = await fetch(`${API_BASE}/api/moderation`);
+  if (!resp.ok) throw new Error('Failed to fetch moderation list');
+  return resp.json();
+}
+
+export interface MediaKeypair {
+  pubkey: string;
+  secret: string;
+}
+
+export async function generateMediaKeypair(): Promise<MediaKeypair> {
+  const resp = await fetch(`${API_BASE}/api/media/keypair`, { method: 'POST' });
+  if (!resp.ok) throw new Error('Failed to generate keypair');
+  return resp.json();
 }
 
 export function subscribeEvents(

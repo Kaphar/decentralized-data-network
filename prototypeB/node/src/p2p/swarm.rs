@@ -25,6 +25,9 @@ use tracing::{debug, info, warn};
 /// Application-level topic used to gossip signed records across the network.
 pub const RECORDS_TOPIC: &str = "ddn/records/v1";
 
+/// Dedicated topic for WebRTC signaling messages (SDP offer/answer, ICE candidates).
+pub const WEBRTC_SIGNAL_TOPIC: &str = "ddn/webrtc/v1";
+
 // ---------------------------------------------------------------------------
 // Behaviour
 // ---------------------------------------------------------------------------
@@ -48,6 +51,8 @@ pub enum P2PCommand {
     Connect(Multiaddr),
     /// Publish an already-signed canonical record JSON to the gossip topic.
     Publish(Vec<u8>),
+    /// Publish a WebRTC signaling message on the signal topic.
+    PublishSignal(Vec<u8>),
     /// Trigger a Kademlia bootstrap round.
     Bootstrap,
 }
@@ -59,10 +64,18 @@ pub struct GossipEvent {
     pub data: Vec<u8>,
 }
 
+/// WebRTC signaling events emitted by the swarm task.
+#[derive(Debug, Clone)]
+pub struct SignalEvent {
+    pub source: String,
+    pub data: Vec<u8>,
+}
+
 /// Handle kept in the axum `AppState`.
 pub struct P2PHandle {
     pub commands: mpsc::UnboundedSender<P2PCommand>,
     pub events: tokio::sync::Mutex<mpsc::UnboundedReceiver<GossipEvent>>,
+    pub signal_events: tokio::sync::Mutex<mpsc::UnboundedReceiver<SignalEvent>>,
     pub local_peer_id: PeerId,
     pub listen_addrs: Vec<String>,
 }
@@ -70,6 +83,10 @@ pub struct P2PHandle {
 impl P2PHandle {
     pub fn publish_record(&self, canonical_json: Vec<u8>) {
         let _ = self.commands.send(P2PCommand::Publish(canonical_json));
+    }
+
+    pub fn publish_signal(&self, signal_data: Vec<u8>) {
+        let _ = self.commands.send(P2PCommand::PublishSignal(signal_data));
     }
 
     pub fn connect(&self, addr: Multiaddr) {
@@ -186,6 +203,14 @@ pub async fn spawn_swarm(
 
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<P2PCommand>();
     let (ev_tx, ev_rx) = mpsc::unbounded_channel::<GossipEvent>();
+    let (sig_tx, sig_rx) = mpsc::unbounded_channel::<SignalEvent>();
+
+    let signal_topic = IdentTopic::new(WEBRTC_SIGNAL_TOPIC);
+    swarm
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&signal_topic)
+        .map_err(|e| format!("subscribe to signal topic: {:?}", e))?;
 
     tokio::spawn(async move {
         let mut connected: HashSet<PeerId> = HashSet::new();
@@ -208,6 +233,12 @@ pub async fn spawn_swarm(
                                 Err(e) => warn!("gossipsub publish failed: {:?}", e),
                             }
                         }
+                        Some(P2PCommand::PublishSignal(data)) => {
+                            match swarm.behaviour_mut().gossipsub.publish(signal_topic.clone().hash(), data) {
+                                Ok(id) => debug!("published webrtc signal, msg-id {}", id),
+                                Err(e) => warn!("gossipsub signal publish failed: {:?}", e),
+                            }
+                        }
                         Some(P2PCommand::Bootstrap) => {
                             if swarm.behaviour_mut().kademlia.bootstrap().is_err() {
                                 debug!("kademlia bootstrap: no known peers yet");
@@ -223,8 +254,15 @@ pub async fn spawn_swarm(
                         )) => {
                             debug!("gossip received ({} bytes, id {})", message.data.len(), message_id);
                             let src = message.source.map(|p| p.to_base58()).unwrap_or_else(|| "unknown".into());
-                            if ev_tx.send(GossipEvent { source: src, data: message.data }).is_err() {
-                                warn!("gossip event receiver dropped");
+                            // Route signal messages to the separate signal channel.
+                            if message.topic == signal_topic.clone().hash() {
+                                if sig_tx.send(SignalEvent { source: src, data: message.data }).is_err() {
+                                    warn!("signal event receiver dropped");
+                                }
+                            } else {
+                                if ev_tx.send(GossipEvent { source: src, data: message.data }).is_err() {
+                                    warn!("gossip event receiver dropped");
+                                }
                             }
                         }
                         SwarmEvent::Behaviour(DdnBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
@@ -269,6 +307,7 @@ pub async fn spawn_swarm(
     Ok(P2PHandle {
         commands: cmd_tx,
         events: tokio::sync::Mutex::new(ev_rx),
+        signal_events: tokio::sync::Mutex::new(sig_rx),
         local_peer_id,
         listen_addrs: announced,
     })
