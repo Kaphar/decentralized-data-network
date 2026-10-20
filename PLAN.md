@@ -89,9 +89,9 @@ Every piece of data is a signed, hash-linked JSON record. The id is the SHA-256 
 | media_offer (Large file via WebRTC) | `{ "target_user": "<recipient_pubkey>", "file_name": "video.mp4", "size_bytes": 15000000, "ephemeral_pubkey": "<x25519_pubkey>" }` |
 | media_accept | `{ "offer_cid": "<cid_of_media_offer>", "ephemeral_pubkey": "<x25519_pubkey>" }` (Triggers WebRTC handshake) |
 | report | `{ "target_cid": "<cid_of_content>", "reason": "explicit_content" }` |
-| mod_action | `{ "target_cid": "<cid_of_content>", "action": "hide" | "nuke", "mod_pubkey": "<pubkey>" }` |
+| mod_action | `{ "target_cid": "<cid_or_ip_or_cidr>", "action": "hide" | "nuke" | "ip_ban", "mod_pubkey": "<pubkey>", "duration_secs": <optional, for ip_ban> }` |
 | mod_grant | `{ "new_mod_pubkey": "<pubkey>", "signed_by": "<admin_pubkey>" }` |
- ## 5. Key Management & Security Flow
+## 5. Key Management & Security Flow
 
 The "No Admin Reset" Rule: To maintain true E2EE, the server/admin must never possess the user's private key.
 
@@ -168,18 +168,28 @@ Since we cannot cryptographically force a node to delete data it already has, mo
 - **Enforcement**:
   - **Client-Side**: Clients subscribed to a mod's public key will automatically blur/hide any `target_cid` marked with `action: "hide"`.
   - **Node-Side**: Node operators can configure their software to subscribe to a trusted mod's blocklist. The node will actively refuse to store or serve any blob matching a `nuke` action, protecting the operator from legal liability.
+  - **IP Ban (Temporary)**: For emergency situations or abusive nodes, mods can issue `mod_action` records with `action: "ip_ban"` and `duration_secs` in the payload. The node extracts the connecting client's IP from the request, checks it against active IP bans (stored in memory, expiring after `duration_secs`), and returns HTTP 429 (Too Many Requests) for all API endpoints. Supports CIDR notation for IP range bans (e.g., `192.168.1.0/24`). Bans are in-memory only — they expire when the node restarts. The `target_cid` field in the payload carries the banned IP/CIDR string.
 
 ## 7. Media Handling Strategy
 
 - **Small Media** (files ≤ 5 MB): Encrypted client-side → Uploaded to local CAS → CID shared in the post record payload's `media` array.
 - **Large Media** (files > 5 MB): Sender generates an ephemeral X25519 keypair (`POST /api/media/keypair`), publishes a `media_offer` record (`POST /api/media/offer` with `target_user`, `file_name`, `size_bytes`, `ephemeral_pubkey`). Recipient replies with `media_accept` (`POST /api/media/accept` with `offer_cid`, `ephemeral_pubkey`). Both clients use the exchanged ephemeral keys to establish a direct WebRTC Data Channel. The encrypted file streams peer-to-peer, bypassing node storage entirely.
+- **Broadcast Mode (no WebRTC)**: A frontend checkbox "Don't use WebRTC" forces **all** file uploads through the CAS blob path, regardless of file size. This overrides the 5 MB threshold and uploads the file as a blob to the local node (`POST /api/blob`), storing it on disk and serving it via `GET /api/blob/:cid`. This is simpler and works without WebRTC (no NAT traversal needed), but stores the file on the node's disk. Intended for trusted local networks or when WebRTC is undesirable (e.g., restricted networks, testing).
+  - **Implementation**: Add a `useWebRTC` signal (default `true`) in `App.tsx`. Pass it as a prop to `PostForm`. When unchecked, `PostForm.handleFileChange` (`PostForm.tsx:39-68`) always calls `onBlobUpload` regardless of file size, skipping `onMediaOffer`. The `PostForm` component is at `frontend/src/components/PostForm.tsx` and the 5 MB threshold is `MEDIA_CAS_THRESHOLD` at `PostForm.tsx:4`.
 
-## 8. Development & Testing Strategy (No VPS Required)
+## 8. Reactions (Emoji Support)
+
+- **Reaction records**: Use the existing `reaction` record type (`records/mod.rs:11`). Payload: `{ "target_cid": "<cid_of_post_or_comment>", "emoji": "👍" }`.
+- **Posting a reaction**: Frontend renders emoji buttons (👍, ❤️, 😄, 😮, 😢, 😡, etc.) on each post and comment card. Clicking an emoji creates a `reaction` record via `POST /api/record/sign` + `POST /api/record` (or directly through `POST /api/record` with a pre-signed record), just like posts/comments.
+- **Aggregating reactions**: The node does not index reactions server-side. Instead, the frontend scans all known `reaction` records (received via `GET /api/wall` or `/ws/events` gossipsub) and groups them by `target_cid` + `emoji`. The `PostList` component (`PostList.tsx:115-203`) renders a reaction summary below each post.
+- **Self-counting & dedup**: Each `reaction` record is signed, so the frontend can detect a user's own reaction by their pubkey and allow toggling (removing) it. Multiple users can react with the same emoji; the count is the number of distinct `reaction` records for that `(target_cid, emoji)` pair.
+
+## 9. Development & Testing Strategy (No VPS Required)
 
 - **Tier 1 — Local LAN Testing (Zero Config)**: Use `libp2p::mdns` (Multicast DNS). Running multiple Rust nodes on the same local machine/Wi-Fi will automatically discover each other without any bootstrap configuration.
 - **Tier 2 — Cross-Internet Testing (Free)**: When testing with external peers, run a dedicated "Bootstrap Node" locally and expose it to the internet for free using Cloudflare Tunnels (`cloudflared`). Hardcode this tunnel address into the Rust node's config as a bootstrap peer.
 
-## 9. Phased Roadmap
+## 10. Phased Roadmap
 
 | Phase | Deliverable | Status | Est. Effort |
 | :--- | :--- | :--- | :--- |
@@ -187,5 +197,7 @@ Since we cannot cryptographically force a node to delete data it already has, mo
 | 0 | Prototype B skeleton: Rust CAS, hash-linked records, SolidJS frontend shell, manual peer config, plaintext posts | **Done** | — |
 | 1 | libp2p Integration: Kademlia DHT + Gossipsub + mDNS. Mandatory `.json` key export UX. WebSocket push from node to frontend. Network status + peer connect UI. | **Done** | ~2 weeks |
 | 2 | E2EE DMs: X25519 + AES-GCM sealed messaging (`seal_dm`/`open_dm` in Rust). DM encrypt/decrypt API endpoints (`POST /api/dm/seal`, `POST /api/dm/open`). Chat UI uses E2EE. WebRTC `media_offer`/`media_accept` signaling records + API endpoints (`POST /api/media/offer`, `POST /api/media/accept`, `POST /api/media/keypair`). Media threshold: files ≤ 5 MB → CAS, files > 5 MB → WebRTC offer. | **Done** | ~3 weeks |
-| 3 | Moderation System: `report`, `mod_grant`, `mod_action` record types. `POST /api/report` endpoint. `GET /api/moderation` endpoint with blocked/hidden CIDs and mod pubkeys. Client-side report UI + moderation panel. Per-post report buttons. Node-level blocked CID enforcement (refuse `GET /api/blob/:cid`, `GET /api/record/:id`, refuse `POST /api/blob`, `POST /api/record` for nuked content). Client-side hide filtering (blur posts with `action: "hide"`). | **Done** | ~2 weeks |
-| 4 | Hardening & Scale: Refine Rust/Tauri integration if needed. Evaluate migrating the custom CAS to IPFS/Kubo for better global chunking and NAT traversal. | Planned | Open
+| 3 | Moderation System: `report`, `mod_grant`, `mod_action` record types. `POST /api/report` endpoint. `GET /api/moderation` endpoint with blocked/hidden CIDs and mod pubkeys. Client-side report UI + moderation panel. Per-post report buttons. Node-level blocked CID enforcement (refuse `GET /api/blob/:cid`, `GET /api/record/:id`, refuse `POST /api/blob`, `POST /api/record` for nuked content). Client-side hide filtering (blur posts with `action: "hide"`). **IP Ban**: `mod_action` with `action: "ip_ban"` + `duration_secs` → in-memory CIDR IP bans, HTTP 429 for banned clients. | **Done** | ~2 weeks |
+| 4 | Reactions: `reaction` record type. Emoji buttons on posts/comments in `PostList` + `Chat`. Client-side aggregation of reactions by `target_cid` + `emoji`. Toggle/remove own reactions. | **Planned** | ~1 week |
+| 5 | Identity Persistence & Management: Save `ddn_identity.json` to `DDN_DATA_DIR` on first run. Load on subsequent startups. `POST /api/identity/unlock`, `POST /api/identity/import`, `DELETE /api/identity` endpoints. New `IdentityManager` frontend component for switch/add/remove/import. **Broadcast Mode**: "Don't use WebRTC" checkbox in `PostForm` — overrides 5 MB threshold, forces all uploads through CAS blob path. | **Planned** | ~2 weeks |
+| 6 | Hardening & Scale: Refine Rust/Tauri integration if needed. Evaluate migrating the custom CAS to IPFS/Kubo for better global chunking and NAT traversal. | Planned | Open |
