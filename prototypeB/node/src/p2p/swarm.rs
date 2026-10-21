@@ -11,13 +11,13 @@ use std::collections::HashSet;
 use futures::StreamExt;
 use libp2p::gossipsub::{self, IdentTopic, MessageAuthenticity, ValidationMode};
 use libp2p::identify::{self, Event as IdentifyEvent};
-use libp2p::kad::{record::store::MemoryStore, Behaviour as Kademlia, Event as KademliaEvent, QueryResult};
+use libp2p::kad::{
+    record::store::MemoryStore, Behaviour as Kademlia, Event as KademliaEvent, QueryResult,
+};
 use libp2p::mdns;
 use libp2p::multiaddr::Protocol;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
-use libp2p::{
-    identity, noise, tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
-};
+use libp2p::{identity, noise, tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -105,8 +105,7 @@ fn derive_libp2p_identity(secret: &[u8]) -> identity::Keypair {
     hasher.update(b"ddn-libp2p-ed25519-v1");
     hasher.update(secret);
     let seed: [u8; 32] = hasher.finalize().into();
-    let sk = identity::ed25519::SecretKey::try_from_bytes(seed)
-        .expect("valid ed25519 seed");
+    let sk = identity::ed25519::SecretKey::try_from_bytes(seed).expect("valid ed25519 seed");
     let ed = identity::ed25519::Keypair::from(sk);
     identity::Keypair::from(ed)
 }
@@ -132,11 +131,9 @@ pub async fn spawn_swarm(
         .validation_mode(ValidationMode::Permissive) // records are signature-verified downstream
         .build()
         .map_err(|e| format!("gossipsub config: {:?}", e))?;
-    let gossipsub = gossipsub::Behaviour::new(
-        MessageAuthenticity::Signed(id_keys.clone()),
-        gs_config,
-    )
-    .map_err(|e| format!("gossipsub init: {:?}", e))?;
+    let gossipsub =
+        gossipsub::Behaviour::new(MessageAuthenticity::Signed(id_keys.clone()), gs_config)
+            .map_err(|e| format!("gossipsub init: {:?}", e))?;
 
     let identify = identify::Behaviour::new(identify::Config::new(
         "/ddn/id/1.0.0".to_string(),
@@ -178,11 +175,13 @@ pub async fn spawn_swarm(
         match bp.parse::<Multiaddr>() {
             Ok(addr) => {
                 info!("bootstrapping toward {}", addr);
-                if let Some(Protocol::P2p(peer)) = addr.iter().find(|p| matches!(p, Protocol::P2p(_))) {
+                if let Some(Protocol::P2p(peer)) =
+                    addr.iter().find(|p| matches!(p, Protocol::P2p(_)))
+                {
                     swarm
                         .behaviour_mut()
                         .kademlia
-                        .add_address(&peer.into(), addr.clone());
+                        .add_address(&peer, addr.clone());
                 }
                 if let Err(e) = swarm.dial(addr.clone()) {
                     warn!("initial dial failed for {}: {:?}", addr, e);
@@ -194,7 +193,7 @@ pub async fn spawn_swarm(
 
     let announced: Vec<String> = swarm
         .listeners()
-        .map(|a| a.clone().with(Protocol::P2p(local_peer_id.into())).to_string())
+        .map(|a| a.clone().with(Protocol::P2p(local_peer_id)).to_string())
         .collect();
     info!("libp2p peer id: {}", local_peer_id);
     for a in &announced {
@@ -220,9 +219,9 @@ pub async fn spawn_swarm(
                     match maybe_cmd {
                         Some(P2PCommand::Connect(addr)) => {
                             info!("dialing peer {}", addr);
-                            if let Some(Protocol::P2p(peer)) = addr.iter().find(|p| matches!(p, Protocol::P2p(_))) {
-                                swarm.behaviour_mut().kademlia.add_address(&peer.into(), addr.clone());
-                            }
+                if let Some(Protocol::P2p(peer)) = addr.iter().find(|p| matches!(p, Protocol::P2p(_))) {
+                    swarm.behaviour_mut().kademlia.add_address(&peer, addr.clone());
+                }
                             if let Err(e) = swarm.dial(addr.clone()) {
                                 warn!("dial failed for {}: {:?}", addr, e);
                             }
@@ -289,13 +288,12 @@ pub async fn spawn_swarm(
                             debug!("kademlia bootstrap finished: {} peers remaining in query", res.num_remaining);
                         }
                         SwarmEvent::NewListenAddr { address, .. } => {
-                            info!("swarm listening on {}", address.with(Protocol::P2p(local_peer_id.into())));
+                            info!("swarm listening on {}", address.with(Protocol::P2p(local_peer_id)));
                         }
-                        SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
-                            if connected.remove(&peer_id) {
-                                info!("disconnected from peer {}", peer_id);
-                                swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
-                            }
+                        SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. }
+                        if connected.remove(&peer_id) => {
+                            info!("disconnected from peer {}", peer_id);
+                            swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
                         }
                         _ => {}
                     }
@@ -331,7 +329,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn two_node_gossip() {
         let secret_a = Keypair::generate().secret_bytes();
-        let handle_a = spawn_swarm(&secret_a, 4002, vec![]).await.expect("node A swarm");
+        let handle_a = spawn_swarm(&secret_a, 4002, vec![])
+            .await
+            .expect("node A swarm");
 
         // The listen_addrs may not be populated yet (swarm task hasn't polled).
         // Use the known TCP port to construct the bootstrap multiaddr.
@@ -339,7 +339,9 @@ mod tests {
         let bootstrap = format!("/ip4/127.0.0.1/tcp/4002/p2p/{}", peer_id_a);
 
         let secret_b = Keypair::generate().secret_bytes();
-        let handle_b = spawn_swarm(&secret_b, 4003, vec![bootstrap]).await.expect("node B swarm");
+        let handle_b = spawn_swarm(&secret_b, 4003, vec![bootstrap])
+            .await
+            .expect("node B swarm");
 
         // Wait for nodes to discover and connect each other.
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -378,6 +380,9 @@ mod tests {
             }
         }
 
-        assert!(received, "node B did not receive the gossiped record from node A");
+        assert!(
+            received,
+            "node B did not receive the gossiped record from node A"
+        );
     }
 }

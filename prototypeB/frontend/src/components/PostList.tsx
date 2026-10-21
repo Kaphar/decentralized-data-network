@@ -1,4 +1,4 @@
-import { Component, createMemo, Show } from 'solid-js';
+import { Component, createMemo, Show, createSignal } from 'solid-js';
 import { For } from 'solid-js';
 import { reportContent } from '../api';
 import type { BaseRecord, MediaRef } from '../types';
@@ -8,6 +8,8 @@ export interface PostListProps {
   records: BaseRecord[];
   onReport?: (cid: string, reason: string) => void;
   hiddenCids?: string[];
+  currentPubKey?: string;
+  onReaction?: (targetCid: string, emoji: string) => void;
   receivers?: Map<string, WebRTCReceiver>;
   onReceiveOffer?: (offer: MediaOfferInfo) => void;
 }
@@ -74,6 +76,74 @@ export const PostList: Component<PostListProps> = (props) => {
   };
 
   const hiddenSet = new Set(props.hiddenCids ?? []);
+  const [hiddenReactions, setHiddenReactions] = createSignal<Set<string>>(new Set());
+
+  const myPubKey = () => props.currentPubKey ?? '';
+
+  const REACTION_EMOJIS = ['👍', '❤️', '😄', '😮', '😢', '😡'];
+
+  const reactionsFor = (targetCid: string) => {
+    return props.records
+      .filter((r) => r.type === 'reaction')
+      .map((r) => {
+        const p = r.payload as Record<string, unknown>;
+        return {
+          id: r.id,
+          author: r.author,
+          emoji: (p.emoji as string) ?? '',
+          target_cid: (p.target_cid as string) ?? '',
+        };
+      })
+      .filter((r) => r.target_cid === targetCid && r.emoji);
+  };
+
+  const handleReactionClick = (targetCid: string, emoji: string) => {
+    if (!myPubKey() || !props.onReaction) return;
+    props.onReaction(targetCid, emoji);
+  };
+
+  const toggleReaction = (reactionId: string) => {
+    const current = new Set(hiddenReactions());
+    if (current.has(reactionId)) {
+      current.delete(reactionId);
+    } else {
+      current.add(reactionId);
+    }
+    setHiddenReactions(current);
+  };
+
+  const renderReactions = (targetCid: string) => {
+    const reactions = reactionsFor(targetCid);
+    const hidden = hiddenReactions();
+    const visible = reactions.filter((r) => !hidden.has(r.id));
+
+    return (
+      <div class="reactions-bar">
+        {REACTION_EMOJIS.map((emoji) => {
+          const matching = visible.filter((r) => r.emoji === emoji);
+          const hasReacted = matching.some((r) => r.author === myPubKey());
+          const count = matching.length;
+          return (
+            <button
+              class={`reaction-btn ${hasReacted ? 'reacted' : ''}`}
+              onclick={() => {
+                if (hasReacted) {
+                  // Locally remove own reactions (cannot delete from network)
+                  matching.filter((r) => r.author === myPubKey()).forEach((r) => toggleReaction(r.id));
+                } else {
+                  handleReactionClick(targetCid, emoji);
+                }
+              }}
+              title={hasReacted ? 'Click to remove your reaction' : `React with ${emoji}`}
+            >
+              {emoji}
+              {count > 0 && <span class="reaction-count">{count}</span>}
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
 
   return (
     <div class="post-list">
@@ -180,6 +250,7 @@ export const PostList: Component<PostListProps> = (props) => {
                   )
                 }
               </For>
+              {renderReactions(record.id)}
               <For each={getCommentsFor(record.id)}>
                 {(comment) => {
                   const p = comment.payload as Record<string, unknown>;
@@ -197,6 +268,7 @@ export const PostList: Component<PostListProps> = (props) => {
                         <div class="warning-banner" style={{ "font-size": "0.7rem" }}>Hidden by moderation</div>
                       </Show>
                       <div class="comment-content">{p.text as string}</div>
+                      {renderReactions(comment.id)}
                     </div>
                   );
                 }}

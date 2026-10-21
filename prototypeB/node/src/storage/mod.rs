@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
 use std::fs;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 pub struct ContentAddressedStore {
     pub base_path: PathBuf,
@@ -81,5 +81,8 @@ impl ContentAddressedStore {
 }
 
 pub fn compute_id(record_json: &str) -> String {
-    Sha256::digest(record_json.as_bytes()).iter().map(|b| format!("{:02x}", b)).collect()
+    Sha256::digest(record_json.as_bytes())
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }

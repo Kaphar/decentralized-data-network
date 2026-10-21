@@ -6,6 +6,7 @@ import { IdentityBadge } from './components/IdentityBadge';
 import { PeerManager } from './components/PeerManager';
 import { Network } from './components/Network';
 import { KeyBackup } from './components/KeyBackup';
+import { IdentityManager } from './components/IdentityManager';
 import { Moderation } from './components/Moderation';
 import { FileTransfer } from './components/FileTransfer';
 import {
@@ -20,6 +21,8 @@ import {
   sendMediaOffer,
   sendMediaAccept,
   sendWebrtcSignal,
+  postReaction,
+  unlockIdentity,
   type MediaKeypair,
 } from './api';
 import type { BaseRecord, IdentityInfo, WsEvent, WsWebrtcSignalEvent, MediaRef } from './types';
@@ -89,6 +92,8 @@ export default function App() {
   const [wsConnected, setWsConnected] = createSignal(false);
   const [hiddenCids, setHiddenCids] = createSignal<string[]>([]);
   const [signalEvents, setSignalEvents] = createSignal<WsWebrtcSignalEvent[]>([]);
+  const [useWebRTC, setUseWebRTC] = createSignal(true);
+  const [unlocked, setUnlocked] = createSignal(true);
 
   const [webRTCSenders, setWebRTCSenders] = createSignal<Map<string, WebRTCSender>>(new Map());
   const [receivers, setReceivers] = createSignal<Map<string, WebRTCReceiver>>(new Map());
@@ -113,6 +118,30 @@ export default function App() {
     try {
       const info = await fetchIdentity();
       setIdentity(info);
+      setUnlocked(!info.locked);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleUnlock(password: string) {
+    try {
+      const result = await unlockIdentity(password);
+      setIdentity((prev) => prev ? { ...prev, locked: result.locked } : null);
+      setUnlocked(true);
+      setError(null);
+      await loadWall(true);
+      await loadModerationStatus();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleReaction(targetCid: string, emoji: string) {
+    if (!identity() || identity()!.locked) return;
+    try {
+      await postReaction(targetCid, emoji, identity()!.pubkey);
+      await loadWall(true);
     } catch (e) {
       setError(String(e));
     }
@@ -517,6 +546,8 @@ export default function App() {
               onBlobUpload={handleBlobUpload}
               onMediaOffer={handleMediaOffer}
               currentPubKey={identity()?.pubkey ?? ''}
+              useWebRTC={useWebRTC()}
+              onUseWebRTCChange={setUseWebRTC}
             />
             <PeerManager onSync={handleSync} />
           </aside>
@@ -529,6 +560,8 @@ export default function App() {
                 <PostList
                   records={records()}
                   hiddenCids={hiddenCids()}
+                  currentPubKey={identity()?.pubkey ?? ''}
+                  onReaction={handleReaction}
                   receivers={receivers()}
                   onReceiveOffer={startReceive}
                 />
@@ -538,7 +571,7 @@ export default function App() {
         </Show>
 
         <Show when={activeTab() === 'chat'}>
-          <Chat records={records()} currentPubKey={identity()?.pubkey ?? ''} />
+          <Chat records={records()} currentPubKey={identity()?.pubkey ?? ''} onReaction={handleReaction} />
         </Show>
 
         <Show when={activeTab() === 'peers'}>
@@ -549,6 +582,8 @@ export default function App() {
             <PostList
               records={records()}
               hiddenCids={hiddenCids()}
+              currentPubKey={identity()?.pubkey ?? ''}
+              onReaction={handleReaction}
               receivers={receivers()}
               onReceiveOffer={startReceive}
             />
@@ -556,7 +591,18 @@ export default function App() {
         </Show>
 
         <Show when={activeTab() === 'backup'}>
-          <KeyBackup />
+          <div class="backup-view">
+            <KeyBackup />
+            <IdentityManager
+              currentPubKey={identity()?.pubkey ?? ''}
+              locked={unlocked() ? false : (identity()?.locked ?? false)}
+              onUnlock={handleUnlock}
+              onIdentityDeleted={() => {
+                setIdentity(null);
+                setUnlocked(false);
+              }}
+            />
+          </div>
         </Show>
 
         <Show when={activeTab() === 'moderation'}>
@@ -574,7 +620,7 @@ export default function App() {
       </main>
 
       <footer class="app-footer">
-        <p>DDN Prototype B — Phase 2 (E2EE DMs + Moderation)</p>
+        <p>DDN Prototype B — Phase 5 (Identity Persistence + Reactions + Broadcast Mode)</p>
       </footer>
     </div>
   );

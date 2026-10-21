@@ -8,6 +8,8 @@ export interface PostFormProps {
   onBlobUpload: (file: File) => Promise<string | null>;
   onMediaOffer: (file: File) => Promise<string | null>;
   currentPubKey: string;
+  useWebRTC: boolean;
+  onUseWebRTCChange: (value: boolean) => void;
 }
 
 export const PostForm: Component<PostFormProps> = (props) => {
@@ -41,7 +43,7 @@ export const PostForm: Component<PostFormProps> = (props) => {
     const file = input.files?.[0];
     if (!file) return;
 
-    if (file.size <= MEDIA_CAS_THRESHOLD) {
+    if (!props.useWebRTC || file.size <= MEDIA_CAS_THRESHOLD) {
       const cid = await props.onBlobUpload(file);
       if (cid) {
         setPreview({
@@ -110,7 +112,22 @@ export const PostForm: Component<PostFormProps> = (props) => {
             onchange={handleFileChange}
           />
           <span class="hint" style={{ "display": "block", "font-size": "0.75rem", "color": "#888", "margin-top": "0.25rem" }}>
-            Files {'<='} 5 MB upload to local CAS. Files {'>'} 5 MB use WebRTC media offer.
+            {props.useWebRTC
+              ? "Files ≤ 5 MB upload to local CAS. Files > 5 MB use WebRTC media offer."
+              : "Broadcast mode: all files upload to local CAS (no WebRTC)."}
+          </span>
+        </label>
+      </div>
+
+      <div class="form-group">
+        <label>
+          <input
+            type="checkbox"
+            checked={!props.useWebRTC}
+            onchange={(e) => props.onUseWebRTCChange(!(e.target as HTMLInputElement).checked)}
+          />
+          <span class="hint" style={{ "display": "inline-block", "margin-left": "0.5rem" }}>
+            Don't use WebRTC (broadcast mode — all files go through CAS)
           </span>
         </label>
       </div>

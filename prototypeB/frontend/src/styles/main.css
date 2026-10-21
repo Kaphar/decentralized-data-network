@@ -610,3 +610,72 @@ body {
   font-family: 'Monaco', 'Consolas', monospace;
   font-size: 0.85rem;
 }
+
+.reactions-bar {
+  display: flex;
+  gap: 0.25rem;
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.reaction-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  background: #0f0f17;
+  border: 1px solid #2a2a3a;
+  border-radius: 12px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.reaction-btn:hover {
+  background: #1a1a22;
+  border-color: #00d4ff;
+}
+
+.reaction-btn.reacted {
+  background: rgba(0, 212, 255, 0.15);
+  border-color: #00d4ff;
+  color: #00d4ff;
+  font-weight: 600;
+}
+
+.reaction-count {
+  font-size: 0.75rem;
+  color: #aaa;
+  font-weight: 500;
+}
+
+.reaction-btn.reacted .reaction-count {
+  color: #00d4ff;
+}
+
+.identity-manager {
+  padding: 1rem;
+  max-width: 500px;
+  margin: 0 auto;
+}
+
+.identity-manager h3 {
+  margin-top: 0;
+  color: #fff;
+}
+
+.identity-manager .tabs {
+  margin-bottom: 0.5rem;
+}
+
+.identity-manager input[type="file"] {
+  margin: 0.25rem 0;
+}
+
+.backup-view {
+  padding: 1rem;
+}
+
+.backup-view .tabs {
+  margin-bottom: 1rem;
+}

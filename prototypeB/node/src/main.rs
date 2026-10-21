@@ -8,7 +8,7 @@ mod storage;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, Query, State, DefaultBodyLimit,
+        DefaultBodyLimit, Path, Query, State,
     },
     http::StatusCode,
     response::{Html, IntoResponse},
@@ -23,20 +23,25 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use tower_http::services::ServeDir;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::ServeDir;
 use tracing::{info, warn};
 
 struct AppState {
     store: Arc<storage::ContentAddressedStore>,
-    keypair: Arc<crypto::Keypair>,
+    keypair: Arc<RwLock<Option<Arc<crypto::Keypair>>>>,
     pub_key: String,
+    locked: Arc<RwLock<bool>>,
+    encrypted_identity: Arc<RwLock<Option<crypto::IdentityFile>>>,
     peers: Arc<RwLock<Vec<String>>>,
     known_records: Arc<RwLock<HashMap<String, records::BaseRecord>>>,
-    p2p: Option<Arc<p2p::P2PHandle>>,
+    p2p: Arc<RwLock<Option<Arc<p2p::P2PHandle>>>>,
     events: broadcast::Sender<String>,
     connected_peers: Arc<RwLock<HashMap<String, Vec<String>>>>,
-}/// Fan out an event JSON string to all connected browser clients.
+    p2p_port: u16,
+    data_dir: PathBuf,
+}
+/// Fan out an event JSON string to all connected browser clients.
 fn emit(state: &AppState, event: serde_json::Value) {
     let _ = state.events.send(event.to_string());
 }
@@ -53,6 +58,99 @@ async fn is_cid_hidden(state: &AppState, cid: &str) -> bool {
     let known = state.known_records.read().await;
     let (_, hidden, _) = compute_moderation_sets(&known, &state.pub_key);
     hidden.contains(cid)
+}
+
+/// Start the libp2p swarm and spawn the gossip + signal consumer tasks.
+async fn start_swarm_and_consumers(
+    state: Arc<AppState>,
+    secret: &[u8],
+    port: u16,
+    bootstrap_peers: Vec<String>,
+) {
+    match p2p::spawn_swarm(secret, port, bootstrap_peers).await {
+        Ok(handle) => {
+            let handle = Arc::new(handle);
+            *state.p2p.write().await = Some(handle.clone());
+            info!("libp2p swarm started (peer {})", handle.local_peer_id);
+
+            // --- gossip consumer task: verify -> store -> broadcast to browsers
+            let consumer_state = state.clone();
+            let handle_a = handle.clone();
+            tokio::spawn(async move {
+                let mut rx = handle_a.events.lock().await;
+                while let Some(ev) = rx.recv().await {
+                    let record: records::BaseRecord = match serde_json::from_slice(&ev.data) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+                    if record.verify().is_err() {
+                        warn!("dropping gossip record with bad signature: {}", record.id);
+                        continue;
+                    }
+                    let is_new = {
+                        let mut known = consumer_state.known_records.write().await;
+                        if known.contains_key(&record.id) {
+                            false
+                        } else {
+                            let canonical = record.to_canonical_json().unwrap_or_default();
+                            consumer_state
+                                .store
+                                .put_record(&record.id, canonical.as_bytes())
+                                .ok();
+                            known.insert(record.id.clone(), record.clone());
+                            true
+                        }
+                    };
+                    if is_new {
+                        emit(
+                            &consumer_state,
+                            json!({
+                                "type": "gossip",
+                                "source": ev.source,
+                                "record": &record,
+                            }),
+                        );
+                    }
+                }
+            });
+
+            // --- signal consumer task: relay WebRTC signaling to browser via WS
+            let signal_state = state.clone();
+            let handle_b = handle.clone();
+            tokio::spawn(async move {
+                let mut rx = handle_b.signal_events.lock().await;
+                while let Some(ev) = rx.recv().await {
+                    emit(
+                        &signal_state,
+                        json!({
+                            "type": "webrtc_signal",
+                            "source": ev.source,
+                            "data": base64::engine::general_purpose::STANDARD.encode(&ev.data),
+                        }),
+                    );
+                }
+            });
+        }
+        Err(e) => {
+            warn!("libp2p swarm failed to start: {}", e);
+        }
+    }
+}
+
+/// Guard: return a reference to the in-memory keypair, or a 423 LOCKED response.
+async fn get_keypair_or_locked(
+    state: &AppState,
+) -> Result<Arc<crypto::Keypair>, (StatusCode, Json<serde_json::Value>)> {
+    let guard = state.keypair.read().await;
+    match &*guard {
+        Some(kp) => Ok(Arc::clone(kp)),
+        None => Err((
+            StatusCode::LOCKED,
+            Json(json!({
+                "error": "identity is locked. POST /api/identity/unlock with your password to activate signing and networking."
+            })),
+        )),
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -109,13 +207,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&data_path)?;
 
     let store = Arc::new(storage::ContentAddressedStore::new(&data_path));
-    let keypair = Arc::new(crypto::Keypair::generate());
-    let pub_key = crypto::pubkey_to_cid(&keypair.public_key_bytes());
+
+    // --- Identity persistence (Phase 5) ---------------------------------
+    let identity_path = crypto::identity_file_path(&data_path);
+    let (keypair_arc_opt, pub_key, locked, encrypted_identity) = if identity_path.exists() {
+        match crypto::read_identity_file(&identity_path) {
+            Ok(file) => {
+                if file.auto_unlock {
+                    match crypto::load_identity_file(&file, "") {
+                        Ok(kp) => (Some(Arc::new(kp)), file.pubkey.clone(), false, None),
+                        Err(e) => {
+                            warn!("auto-unlock failed ({}), starting locked", e);
+                            (None, file.pubkey.clone(), true, Some(file))
+                        }
+                    }
+                } else {
+                    (None, file.pubkey.clone(), true, Some(file))
+                }
+            }
+            Err(e) => {
+                warn!("identity file unreadable ({}), generating new identity", e);
+                let kp = crypto::Keypair::generate();
+                let pk = crypto::pubkey_to_cid(&kp.public_key_bytes());
+                crypto::save_identity_to_disk(&identity_path, &kp, "", true)
+                    .map_err(|e| format!("failed to save identity: {}", e))?;
+                info!("Generated and saved new identity: {}", pk);
+                (Some(Arc::new(kp)), pk, false, None)
+            }
+        }
+    } else {
+        let kp = crypto::Keypair::generate();
+        let pk = crypto::pubkey_to_cid(&kp.public_key_bytes());
+        crypto::save_identity_to_disk(&identity_path, &kp, "", true)
+            .map_err(|e| format!("failed to save identity: {}", e))?;
+        info!("Generated and saved new identity: {}", pk);
+        (Some(Arc::new(kp)), pk, false, None)
+    };
 
     info!("Node public key (author): {}", pub_key);
     info!("Data directory: {}", data_dir);
+    if locked {
+        warn!("Identity is LOCKED — call POST /api/identity/unlock with your password to activate signing and networking.");
+    }
 
     // --- libp2p swarm (Phase 1) --------------------------------------------
+    let (events_tx, _events_rx0) = broadcast::channel::<String>(256);
+    let connected_peers: Arc<RwLock<HashMap<String, Vec<String>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+
     let p2p_port: u16 = std::env::var("DDN_P2P_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -127,79 +266,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    let (events_tx, _events_rx0) = broadcast::channel::<String>(256);
-    let connected_peers: Arc<RwLock<HashMap<String, Vec<String>>>> =
-        Arc::new(RwLock::new(HashMap::new()));
-
-    let p2p_handle = match p2p::spawn_swarm(&keypair.secret_bytes(), p2p_port, bootstrap_peers).await {
-        Ok(h) => Some(Arc::new(h)),
-        Err(e) => {
-            warn!("libp2p swarm failed to start (falling back to HTTP sync only): {}", e);
-            None
-        }
-    };
-
     let state = Arc::new(AppState {
         store,
-        keypair,
+        keypair: Arc::new(RwLock::new(keypair_arc_opt)),
         pub_key,
+        locked: Arc::new(RwLock::new(locked)),
+        encrypted_identity: Arc::new(RwLock::new(encrypted_identity)),
         peers: Arc::new(RwLock::new(Vec::new())),
         known_records: Arc::new(RwLock::new(HashMap::new())),
-        p2p: p2p_handle.clone(),
+        p2p: Arc::new(RwLock::new(None)),
         events: events_tx,
         connected_peers: connected_peers.clone(),
+        p2p_port,
+        data_dir: data_path.clone(),
     });
 
-    // --- gossip consumer task: verify -> store -> broadcast to browsers ----
-    if let Some(handle) = p2p_handle {
-        let consumer_state = state.clone();
-        let handle_clone = handle.clone();
-        tokio::spawn(async move {
-            let mut rx = handle.events.lock().await;
-            while let Some(ev) = rx.recv().await {
-                let record: records::BaseRecord = match serde_json::from_slice(&ev.data) {
-                    Ok(r) => r,
-                    Err(_) => continue, // not a canonical record — drop
-                };
-                if record.verify().is_err() {
-                    warn!("dropping gossip record with bad signature: {}", record.id);
-                    continue;
-                }
-                let is_new = {
-                    let mut known = consumer_state.known_records.write().await;
-                    if known.contains_key(&record.id) {
-                        false
-                    } else {
-                        let canonical = record.to_canonical_json().unwrap_or_default();
-                        consumer_state.store.put_record(&record.id, canonical.as_bytes()).ok();
-                        known.insert(record.id.clone(), record.clone());
-                        true
-                    }
-                };
-                if is_new {
-                    emit(&consumer_state, json!({
-                        "type": "gossip",
-                        "source": ev.source,
-                        "record": &record,
-                    }));
-                }
-            }
-        });
-
-        // --- signal consumer task: relay WebRTC signaling to browser via WS --
-        let signal_state = state.clone();
-        tokio::spawn(async move {
-            let mut rx = handle_clone.signal_events.lock().await;
-            while let Some(ev) = rx.recv().await {
-                // Forward the signaling payload to all connected browsers.
-                // The browser filters by `target` pubkey.
-                emit(&signal_state, json!({
-                    "type": "webrtc_signal",
-                    "source": ev.source,
-                    "data": base64::engine::general_purpose::STANDARD.encode(&ev.data),
-                }));
-            }
-        });
+    // --- Start libp2p swarm (only if identity is unlocked) ---------------
+    if !locked {
+        if let Some(kp) = state.keypair.read().await.as_ref() {
+            start_swarm_and_consumers(state.clone(), &kp.secret_bytes(), p2p_port, bootstrap_peers)
+                .await;
+        }
     }
 
     let cors = CorsLayer::new()
@@ -220,7 +307,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let app = Router::new()
-        .route("/api/blob", post(upload_blob).get(list_blobs).layer(DefaultBodyLimit::max(MAX_BLOB_SIZE as usize)))
+        .route(
+            "/api/blob",
+            post(upload_blob)
+                .get(list_blobs)
+                .layer(DefaultBodyLimit::max(MAX_BLOB_SIZE as usize)),
+        )
         .route("/api/blob/:cid", get(get_blob))
         .route("/api/record", post(upload_record))
         .route("/api/record/sign", post(sign_record))
@@ -238,9 +330,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/moderation", get(moderation_status))
         .route("/api/peers", post(add_peer).get(list_peers))
         .route("/api/sync", post(sync))
-        .route("/api/identity", get(get_identity))
+        .route("/api/identity", get(get_identity).delete(delete_identity))
         .route("/api/identity/backup", post(backup_identity))
+        .route("/api/identity/export", post(backup_identity))
         .route("/api/identity/restore", post(restore_identity))
+        .route("/api/identity/unlock", post(unlock_identity))
+        .route("/api/identity/import", post(import_identity))
         .route("/api/network", get(network_status))
         .route("/api/network/connect", post(network_connect))
         .route("/ws/events", get(ws_events))
@@ -278,8 +373,10 @@ async fn serve_frontend() -> impl IntoResponse {
 }
 
 async fn get_identity(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let locked = *state.locked.read().await;
     Json(json!({
         "pubkey": state.pub_key,
+        "locked": locked,
     }))
 }
 
@@ -288,24 +385,42 @@ struct BackupRequest {
     password: String,
 }
 
-async fn backup_identity(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> axum::response::Response {
+async fn backup_identity(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
     let req: BackupRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid request: {}", e)}))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid request: {}", e)})),
+            )
+                .into_response();
         }
     };
-    let file = crypto::create_identity_file(&state.keypair, &req.password);
+    let kp = match get_keypair_or_locked(&state).await {
+        Ok(k) => k,
+        Err(e) => return e.into_response(),
+    };
+    let file = crypto::create_identity_file(&kp, &req.password);
     let json_str = match serde_json::to_string(&file) {
         Ok(s) => s,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("serialization failed: {}", e)}))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("serialization failed: {}", e)})),
+            )
+                .into_response();
         }
     };
     axum::response::Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
-        .header("Content-Disposition", "attachment; filename=ddn_backup.json")
+        .header(
+            "Content-Disposition",
+            "attachment; filename=ddn_backup.json",
+        )
         .body(axum::body::Body::from(json_str))
         .unwrap()
 }
@@ -320,7 +435,11 @@ async fn restore_identity(body: axum::body::Bytes) -> axum::response::Response {
     let req: RestoreRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid request: {}", e)}))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid request: {}", e)})),
+            )
+                .into_response();
         }
     };
     match crypto::load_identity_file(&req.file, &req.password) {
@@ -333,10 +452,157 @@ async fn restore_identity(body: axum::body::Bytes) -> axum::response::Response {
                 .body(axum::body::Body::from(json_str))
                 .unwrap()
         }
-        Err(e) => {
-            (StatusCode::UNAUTHORIZED, Json(json!({"error": e}))).into_response()
-        }
+        Err(e) => (StatusCode::UNAUTHORIZED, Json(json!({"error": e}))).into_response(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5: Identity persistence & management
+// ---------------------------------------------------------------------------
+
+/// Response for identity unlock: whether the node is now unlocked and the
+/// pubkey of the active identity (unchanged across restart).
+#[derive(Serialize, Deserialize)]
+struct IdentityInfoResponse {
+    pubkey: String,
+    locked: bool,
+    peer_id: Option<String>,
+    listen_addrs: Vec<String>,
+}
+
+/// POST /api/identity/unlock — submit a password to decrypt the on-disk
+/// identity. On success the keypair is loaded into memory and the libp2p
+/// swarm is started. Until unlocked, signing, gossipsub, and record
+/// submission are blocked.
+async fn unlock_identity(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let req: BackupRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid request: {}", e)})),
+            )
+                .into_response();
+        }
+    };
+
+    let encrypted = state.encrypted_identity.read().await.clone();
+    let file = match encrypted {
+        Some(f) => f,
+        None => {
+            // Already unlocked or no encrypted file.
+            let locked = *state.locked.read().await;
+            return (
+                StatusCode::OK,
+                Json(json!({ "pubkey": state.pub_key, "locked": locked })),
+            )
+                .into_response();
+        }
+    };
+
+    match crypto::load_identity_file(&file, &req.password) {
+        Ok(kp) => {
+            *state.keypair.write().await = Some(Arc::new(kp.clone()));
+            *state.locked.write().await = false;
+            *state.encrypted_identity.write().await = None;
+            info!("Identity unlocked — starting libp2p swarm");
+            start_swarm_and_consumers(
+                state.clone(),
+                &kp.secret_bytes(),
+                state.p2p_port,
+                Vec::new(),
+            )
+            .await;
+            (
+                StatusCode::OK,
+                Json(json!({ "pubkey": state.pub_key, "locked": false })),
+            )
+                .into_response()
+        }
+        Err(_) => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "invalid password"})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/identity/import — import an IdentityFile from a backup .json +
+/// password. The file is written to {DDN_DATA_DIR}/ddn_identity.json,
+/// replacing the current one. The node must be restarted for the new identity
+/// to take effect (the libp2p PeerId is derived from the Ed25519 secret).
+async fn import_identity(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let req: RestoreRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid request: {}", e)})),
+            )
+                .into_response();
+        }
+    };
+
+    // Verify the password decrypts the file before writing to disk.
+    match crypto::load_identity_file(&req.file, &req.password) {
+        Ok(_) => {
+            let identity_path = crypto::identity_file_path(&state.data_dir);
+            let json_str = match serde_json::to_string_pretty(&req.file) {
+                Ok(s) => s,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("serialization failed: {}", e)})),
+                    )
+                        .into_response();
+                }
+            };
+            if let Err(e) = std::fs::write(&identity_path, json_str) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("failed to write identity file: {}", e)})),
+                )
+                    .into_response();
+            }
+            info!("Imported identity — restart required for changes to take effect");
+            (
+                StatusCode::OK,
+                Json(json!({ "status": "imported", "pubkey": req.file.pubkey, "requires_restart": true })),
+            ).into_response()
+        }
+        Err(_) => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "invalid password or corrupted backup"})),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /api/identity — delete the on-disk identity file. The node will
+/// generate a fresh identity on the next startup.
+async fn delete_identity(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let identity_path = crypto::identity_file_path(&state.data_dir);
+    if identity_path.exists() {
+        if let Err(e) = std::fs::remove_file(&identity_path) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("failed to delete identity: {}", e)})),
+            )
+                .into_response();
+        }
+        info!("Identity file deleted — restart to generate a fresh identity");
+    }
+    (
+        StatusCode::OK,
+        Json(json!({ "status": "deleted", "requires_restart": true })),
+    )
+        .into_response()
 }
 
 /// Maximum blob size accepted by CAS upload (5 MB).
@@ -366,7 +632,10 @@ async fn upload_blob(
         Ok(cid) => (StatusCode::CREATED, Json(json!({ "cid": cid }))),
         Err(e) => {
             warn!("failed to store blob: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "storage failed" })))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "storage failed" })),
+            )
         }
     }
 }
@@ -408,12 +677,18 @@ async fn upload_record(
     let record: records::BaseRecord = match serde_json::from_slice(&bytes) {
         Ok(r) => r,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid record: {}", e)})));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid record: {}", e)})),
+            );
         }
     };
 
     if let Err(e) = record.verify() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("verification failed: {}", e)})));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("verification failed: {}", e)})),
+        );
     }
 
     let id = record.id.clone();
@@ -434,7 +709,7 @@ async fn upload_record(
     drop(known);
 
     // Propagate to the mesh over gossipsub (Phase 1).
-    if let Some(p2p) = &state.p2p {
+    if let Some(p2p) = state.p2p.read().await.as_ref() {
         p2p.publish_record(canonical.as_bytes().to_vec());
     }
     emit(&state, json!({ "type": "record", "record": &record }));
@@ -449,19 +724,29 @@ async fn sign_record(
     let req: records::SignRequest = match serde_json::from_slice(&bytes) {
         Ok(r) => r,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid request: {}", e)})));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid request: {}", e)})),
+            );
         }
     };
-    let record = records::BaseRecord::from_sign_request(&req, &state.keypair);
-    (StatusCode::OK, Json(json!({
-        "id": record.id,
-        "type": serde_json::to_string(&record.r#type).unwrap_or_default().trim_matches('"').to_string(),
-        "author": record.author,
-        "prev": record.prev,
-        "ts": record.ts,
-        "payload": record.payload,
-        "sig": record.sig,
-    })))
+    let kp = match get_keypair_or_locked(&state).await {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let record = records::BaseRecord::from_sign_request(&req, &kp);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "id": record.id,
+            "type": serde_json::to_string(&record.r#type).unwrap_or_default().trim_matches('"').to_string(),
+            "author": record.author,
+            "prev": record.prev,
+            "ts": record.ts,
+            "payload": record.payload,
+            "sig": record.sig,
+        })),
+    )
 }
 
 async fn get_record(
@@ -488,7 +773,10 @@ async fn list_records(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .values()
         .map(|r| RecordListEntry {
             id: r.id.clone(),
-            r#type: serde_json::to_string(&r.r#type).unwrap_or_default().trim_matches('"').to_string(),
+            r#type: serde_json::to_string(&r.r#type)
+                .unwrap_or_default()
+                .trim_matches('"')
+                .to_string(),
             author: r.author.clone(),
             ts: r.ts,
         })
@@ -498,11 +786,7 @@ async fn list_records(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 async fn get_wall(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let known = state.known_records.read().await;
-    let posts: Vec<records::BaseRecord> = known
-        .values()
-        .filter(|r| matches!(r.r#type, records::RecordType::Post | records::RecordType::MediaOffer | records::RecordType::MediaAccept))
-        .cloned()
-        .collect();
+    let posts: Vec<records::BaseRecord> = known.values().cloned().collect();
     Json(WallResponse { posts })
 }
 
@@ -520,7 +804,8 @@ async fn get_dm(
             if let Ok(payload) = serde_json::to_value(&r.payload) {
                 if let Some(to) = payload.get("to").and_then(|v| v.as_str()) {
                     if let (Some(me), Some(other)) = (&params.me, &params.other) {
-                        return (r.author == *me && to == *other) || (r.author == *other && to == *me);
+                        return (r.author == *me && to == *other)
+                            || (r.author == *other && to == *me);
                     }
                 }
             }
@@ -538,7 +823,10 @@ async fn add_peer(
     let input: PeerAdd = match serde_json::from_slice(&bytes) {
         Ok(p) => p,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid input: {}", e)})));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid input: {}", e)})),
+            );
         }
     };
     let mut peers = state.peers.write().await;
@@ -556,7 +844,7 @@ async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 async fn sync(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Trigger a libp2p bootstrap round as well (Phase 1); the legacy manual
     // HTTP pull below stays as a fallback transport.
-    if let Some(p2p) = &state.p2p {
+    if let Some(p2p) = state.p2p.read().await.as_ref() {
         p2p.bootstrap();
     }
 
@@ -567,7 +855,7 @@ async fn sync(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     for peer_url in &peers {
         let base_url = peer_url.trim_end_matches('/');
-        match client.get(&format!("{}/api/records", base_url)).send().await {
+        match client.get(format!("{}/api/records", base_url)).send().await {
             Ok(resp) => {
                 if let Ok(list) = resp.json::<RecordListResponse>().await {
                     let mut known = state.known_records.write().await;
@@ -575,20 +863,33 @@ async fn sync(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                         if known.contains_key(&entry.id) {
                             continue;
                         }
-                        match client.get(&format!("{}/api/record/{}", base_url, entry.id)).send().await {
+                        match client
+                            .get(format!("{}/api/record/{}", base_url, entry.id))
+                            .send()
+                            .await
+                        {
                             Ok(record_resp) => {
                                 if let Ok(record_bytes) = record_resp.bytes().await {
-                                    if let Ok(record) = serde_json::from_slice::<records::BaseRecord>(&record_bytes) {
+                                    if let Ok(record) =
+                                        serde_json::from_slice::<records::BaseRecord>(&record_bytes)
+                                    {
                                         if record.id == entry.id && record.verify().is_ok() {
-                                            let canonical = record.to_canonical_json().unwrap_or_default();
-                                            state.store.put_record(&entry.id, canonical.as_bytes()).ok();
+                                            let canonical =
+                                                record.to_canonical_json().unwrap_or_default();
+                                            state
+                                                .store
+                                                .put_record(&entry.id, canonical.as_bytes())
+                                                .ok();
                                             known.insert(entry.id.clone(), record);
                                             added += 1;
                                         }
                                     }
                                 }
                             }
-                            Err(e) => warn!("failed to fetch record {} from {}: {}", entry.id, peer_url, e),
+                            Err(e) => warn!(
+                                "failed to fetch record {} from {}: {}",
+                                entry.id, peer_url, e
+                            ),
                         }
                     }
                 }
@@ -621,9 +922,7 @@ struct SealDmResponse {
     ephemeral_pubkey: String,
 }
 
-async fn seal_dm_endpoint(
-    bytes: axum::body::Bytes,
-) -> impl IntoResponse {
+async fn seal_dm_endpoint(bytes: axum::body::Bytes) -> impl IntoResponse {
     let req: SealDmRequest = match serde_json::from_slice(&bytes) {
         Ok(r) => r,
         Err(e) => {
@@ -707,8 +1006,13 @@ async fn open_dm_endpoint(
         }
     };
 
+    let kp = match get_keypair_or_locked(&state).await {
+        Ok(k) => k,
+        Err(e) => return e.into_response(),
+    };
+
     match crypto::open_dm(
-        &state.keypair.secret_bytes(),
+        &kp.secret_bytes(),
         &sender_pub,
         &req.ciphertext,
         &req.nonce,
@@ -774,7 +1078,12 @@ async fn media_offer_endpoint(
         }),
     };
 
-    let record = records::BaseRecord::from_sign_request(&sign_req, &state.keypair);
+    let kp = match get_keypair_or_locked(&state).await {
+        Ok(k) => k,
+        Err(e) => return e.into_response(),
+    };
+
+    let record = records::BaseRecord::from_sign_request(&sign_req, &kp);
     let id = record.id.clone();
     let canonical = record.to_canonical_json().unwrap_or_default();
     state.store.put_record(&id, canonical.as_bytes()).ok();
@@ -783,12 +1092,16 @@ async fn media_offer_endpoint(
     known.insert(id.clone(), record.clone());
     drop(known);
 
-    if let Some(p2p) = &state.p2p {
+    if let Some(p2p) = state.p2p.read().await.as_ref() {
         p2p.publish_record(canonical.as_bytes().to_vec());
     }
     emit(&state, json!({ "type": "record", "record": &record }));
 
-    (StatusCode::CREATED, Json(json!({ "id": id, "record": &record }))).into_response()
+    (
+        StatusCode::CREATED,
+        Json(json!({ "id": id, "record": &record })),
+    )
+        .into_response()
 }
 
 /// POST /api/media/accept — create a `media_accept` record in response to a
@@ -832,7 +1145,12 @@ async fn media_accept_endpoint(
         }),
     };
 
-    let record = records::BaseRecord::from_sign_request(&sign_req, &state.keypair);
+    let kp = match get_keypair_or_locked(&state).await {
+        Ok(k) => k,
+        Err(e) => return e.into_response(),
+    };
+
+    let record = records::BaseRecord::from_sign_request(&sign_req, &kp);
     let id = record.id.clone();
     let canonical = record.to_canonical_json().unwrap_or_default();
     state.store.put_record(&id, canonical.as_bytes()).ok();
@@ -841,12 +1159,16 @@ async fn media_accept_endpoint(
     known.insert(id.clone(), record.clone());
     drop(known);
 
-    if let Some(p2p) = &state.p2p {
+    if let Some(p2p) = state.p2p.read().await.as_ref() {
         p2p.publish_record(canonical.as_bytes().to_vec());
     }
     emit(&state, json!({ "type": "record", "record": &record }));
 
-    (StatusCode::CREATED, Json(json!({ "id": id, "record": &record }))).into_response()
+    (
+        StatusCode::CREATED,
+        Json(json!({ "id": id, "record": &record })),
+    )
+        .into_response()
 }
 
 /// POST /api/media/keypair — generate an ephemeral X25519 keypair for WebRTC
@@ -855,10 +1177,13 @@ async fn media_accept_endpoint(
 /// be discarded after use.
 async fn generate_keypair_endpoint() -> impl IntoResponse {
     let (pubkey_hex, secret_hex) = crypto::generate_x25519_keypair();
-    (StatusCode::OK, Json(json!({
-        "pubkey": pubkey_hex,
-        "secret": secret_hex,
-    })))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "pubkey": pubkey_hex,
+            "secret": secret_hex,
+        })),
+    )
 }
 
 /// POST /api/webrtc/signal — forward a WebRTC signaling payload (SDP offer/answer
@@ -895,15 +1220,18 @@ async fn webrtc_signal(
                 .into_response();
         }
     };
-    if let Some(p2p) = &state.p2p {
+    if let Some(p2p) = state.p2p.read().await.as_ref() {
         p2p.publish_signal(decoded.clone());
     }
 
-    emit(&state, json!({
-        "type": "webrtc_signal",
-        "source": state.pub_key.clone(),
-        "data": base64::engine::general_purpose::STANDARD.encode(&decoded),
-    }));
+    emit(
+        &state,
+        json!({
+            "type": "webrtc_signal",
+            "source": state.pub_key.clone(),
+            "data": base64::engine::general_purpose::STANDARD.encode(&decoded),
+        }),
+    );
 
     (StatusCode::OK, Json(json!({ "status": "signal sent" }))).into_response()
 }
@@ -950,7 +1278,12 @@ async fn create_report_endpoint(
         }),
     };
 
-    let record = records::BaseRecord::from_sign_request(&sign_req, &state.keypair);
+    let kp = match get_keypair_or_locked(&state).await {
+        Ok(k) => k,
+        Err(e) => return e.into_response(),
+    };
+
+    let record = records::BaseRecord::from_sign_request(&sign_req, &kp);
     let id = record.id.clone();
     let canonical = record.to_canonical_json().unwrap_or_default();
     state.store.put_record(&id, canonical.as_bytes()).ok();
@@ -959,16 +1292,12 @@ async fn create_report_endpoint(
     known.insert(id.clone(), record.clone());
     drop(known);
 
-    if let Some(p2p) = &state.p2p {
+    if let Some(p2p) = state.p2p.read().await.as_ref() {
         p2p.publish_record(canonical.as_bytes().to_vec());
     }
     emit(&state, json!({ "type": "record", "record": &record }));
 
-    (
-        StatusCode::CREATED,
-        Json(ReportResponse { id, record }),
-    )
-        .into_response()
+    (StatusCode::CREATED, Json(ReportResponse { id, record })).into_response()
 }
 
 /// GET /api/moderation — return the list of blocked CIDs and trusted mod
@@ -1020,10 +1349,7 @@ fn compute_moderation_sets(
             continue;
         }
         if let Some(payload) = record.payload.as_object() {
-            let action = payload
-                .get("action")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
             let mod_pk = payload
                 .get("mod_pubkey")
                 .and_then(|v| v.as_str())
@@ -1067,11 +1393,13 @@ struct ConnectQuery {
 /// GET /api/network — libp2p swarm status.
 /// POST /api/network/connect?addr=/ip4/.../tcp/.../p2p/... — dial a peer.
 async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match &state.p2p {
+    let locked = *state.locked.read().await;
+    match state.p2p.read().await.as_ref() {
         Some(h) => {
             let peers = state.connected_peers.read().await;
             Json(json!({
                 "enabled": true,
+                "locked": locked,
                 "peer_id": h.local_peer_id.to_string(),
                 "listen_addrs": h.listen_addrs,
                 "topic": p2p::RECORDS_TOPIC,
@@ -1079,11 +1407,20 @@ async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "manual_peers": state.peers.read().await.clone(),
             }))
         }
-        None => Json(json!({
-            "enabled": false,
-            "reason": "libp2p swarm not running (HTTP sync fallback only)",
-            "manual_peers": state.peers.read().await.clone(),
-        })),
+        None => {
+            let reason = if locked {
+                "Identity is locked — call POST /api/identity/unlock to start networking"
+                    .to_string()
+            } else {
+                "libp2p swarm not running (HTTP sync fallback only)".to_string()
+            };
+            Json(json!({
+                "enabled": false,
+                "locked": locked,
+                "reason": reason,
+                "manual_peers": state.peers.read().await.clone(),
+            }))
+        }
     }
 }
 
@@ -1091,7 +1428,7 @@ async fn network_connect(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ConnectQuery>,
 ) -> impl IntoResponse {
-    match state.p2p.as_ref() {
+    match state.p2p.read().await.as_ref() {
         Some(h) => match q.addr.parse::<libp2p::Multiaddr>() {
             Ok(addr) => {
                 h.connect(addr);
@@ -1121,9 +1458,13 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
     let welcome = json!({
         "type": "hello",
         "pubkey": state.pub_key,
-        "peer_id": state.p2p.as_ref().map(|h| h.local_peer_id.to_string()),
+        "peer_id": state.p2p.read().await.as_ref().map(|h| h.local_peer_id.to_string()),
     });
-    if socket.send(Message::Text(welcome.to_string())).await.is_err() {
+    if socket
+        .send(Message::Text(welcome.to_string()))
+        .await
+        .is_err()
+    {
         return;
     }
     loop {

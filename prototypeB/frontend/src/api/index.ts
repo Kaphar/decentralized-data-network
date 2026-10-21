@@ -35,6 +35,59 @@ export async function backupIdentity(password: string): Promise<IdentityFile> {
   return resp.json();
 }
 
+export async function exportIdentity(password: string): Promise<IdentityFile> {
+  const resp = await fetch(`${API_BASE}/api/identity/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error || 'Failed to export identity');
+  }
+  return resp.json();
+}
+
+export async function unlockIdentity(password: string): Promise<{ pubkey: string; locked: boolean }> {
+  const resp = await fetch(`${API_BASE}/api/identity/unlock`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error || 'Failed to unlock identity');
+  }
+  return resp.json();
+}
+
+export async function importIdentity(
+  file: IdentityFile,
+  password: string,
+): Promise<{ status: string; pubkey: string; requires_restart: boolean }> {
+  const resp = await fetch(`${API_BASE}/api/identity/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file, password }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error || 'Failed to import identity');
+  }
+  return resp.json();
+}
+
+export async function deleteIdentity(): Promise<{ status: string; requires_restart: boolean }> {
+  const resp = await fetch(`${API_BASE}/api/identity`, {
+    method: 'DELETE',
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error || 'Failed to delete identity');
+  }
+  return resp.json();
+}
+
 export async function uploadBlob(file: File): Promise<string> {
   const resp = await fetch(`${API_BASE}/api/blob`, {
     method: 'POST',
@@ -75,6 +128,16 @@ export async function submitRecord(record: BaseRecord): Promise<{ id: string }> 
     throw new Error(err.error || 'Failed to submit record');
   }
   return resp.json();
+}
+
+export async function postReaction(
+  targetCid: string,
+  emoji: string,
+  author: string,
+): Promise<{ id: string }> {
+  const ts = Date.now();
+  const signed = await signRecord('reaction', author, null, ts, { target_cid: targetCid, emoji });
+  return submitRecord(signed);
 }
 
 export async function fetchWall(): Promise<BaseRecord[]> {

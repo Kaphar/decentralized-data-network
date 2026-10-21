@@ -56,11 +56,23 @@ pub struct SignResponse {
 impl BaseRecord {
     pub fn compute_id(&self) -> String {
         let mut map: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-        map.insert("type".to_string(), serde_json::to_value(&self.r#type).unwrap());
-        map.insert("author".to_string(), serde_json::to_value(&self.author).unwrap());
-        map.insert("prev".to_string(), serde_json::to_value(&self.prev).unwrap());
+        map.insert(
+            "type".to_string(),
+            serde_json::to_value(&self.r#type).unwrap(),
+        );
+        map.insert(
+            "author".to_string(),
+            serde_json::to_value(&self.author).unwrap(),
+        );
+        map.insert(
+            "prev".to_string(),
+            serde_json::to_value(&self.prev).unwrap(),
+        );
         map.insert("ts".to_string(), serde_json::to_value(self.ts).unwrap());
-        map.insert("payload".to_string(), serde_json::to_value(&self.payload).unwrap());
+        map.insert(
+            "payload".to_string(),
+            serde_json::to_value(&self.payload).unwrap(),
+        );
         let json = serde_json::to_string(&map).unwrap();
         let mut hasher = Sha256::new();
         hasher.update(json.as_bytes());
@@ -81,7 +93,11 @@ impl BaseRecord {
         }
         let sig_bytes = hex::decode(self.sig.as_ref().ok_or("missing signature")?)
             .map_err(|_| "invalid signature hex")?;
-        crate::crypto::Keypair::verify(&crate::crypto::cid_to_pubkey(&self.author)?, self.id.as_bytes(), &sig_bytes)?;
+        crate::crypto::Keypair::verify(
+            &crate::crypto::cid_to_pubkey(&self.author)?,
+            self.id.as_bytes(),
+            &sig_bytes,
+        )?;
         Ok(())
     }
 
@@ -90,8 +106,8 @@ impl BaseRecord {
     }
 
     pub fn from_sign_request(req: &SignRequest, signing_key: &crate::crypto::Keypair) -> Self {
-        let record_type: RecordType = serde_json::from_str(&format!("\"{}\"", req.r#type))
-            .unwrap_or(RecordType::Post);
+        let record_type: RecordType =
+            serde_json::from_str(&format!("\"{}\"", req.r#type)).unwrap_or(RecordType::Post);
         let mut record = BaseRecord {
             id: String::new(),
             r#type: record_type,

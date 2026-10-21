@@ -29,6 +29,7 @@ export interface MediaRef {
 
 export interface IdentityInfo {
   pubkey: string;
+  locked: boolean;
 }
 
 export interface BlobUploadResponse {

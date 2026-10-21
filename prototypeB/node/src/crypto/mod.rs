@@ -1,8 +1,9 @@
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey, SigningKey};
+use base64::Engine;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use base64::Engine;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
 pub struct Keypair {
@@ -56,7 +57,9 @@ impl Keypair {
         let mut sig_arr = [0u8; 64];
         sig_arr.copy_from_slice(signature);
         let sig = Signature::from_bytes(&sig_arr);
-        verifying.verify(message, &sig).map_err(|_| "signature verification failed")
+        verifying
+            .verify(message, &sig)
+            .map_err(|_| "signature verification failed")
     }
 }
 
@@ -81,7 +84,10 @@ pub struct KdfParams {
 
 impl Default for KdfParams {
     fn default() -> Self {
-        KdfParams { alg: "pbkdf2-sha256".to_string(), iterations: 600_000 }
+        KdfParams {
+            alg: "pbkdf2-sha256".to_string(),
+            iterations: 600_000,
+        }
     }
 }
 
@@ -103,7 +109,10 @@ pub fn encrypt_key_with(password: &str, secret: &[u8], params: &KdfParams) -> En
     let mut salt = [0u8; 16];
     OsRng.fill_bytes(&mut salt);
     let key = derive_key_with(password, &salt, params);
-    use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm, Nonce,
+    };
     let cipher = Aes256Gcm::new((&key).into());
     let mut nonce_bytes = [0u8; 12];
     OsRng.fill_bytes(&mut nonce_bytes);
@@ -121,7 +130,10 @@ pub fn encrypt_key_with(password: &str, secret: &[u8], params: &KdfParams) -> En
 }
 
 pub fn decrypt_key(password: &str, enc: &EncryptedKey) -> Result<Vec<u8>, &'static str> {
-    use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm, Nonce,
+    };
     let engine = base64::engine::general_purpose::STANDARD;
     let salt = engine.decode(&enc.salt).map_err(|_| "invalid salt")?;
     if salt.len() != 16 {
@@ -129,7 +141,9 @@ pub fn decrypt_key(password: &str, enc: &EncryptedKey) -> Result<Vec<u8>, &'stat
     }
     let key = derive_key_with(password, &salt, &enc.kdf);
     let cipher = Aes256Gcm::new((&key).into());
-    let combined = engine.decode(&enc.encrypted_secret).map_err(|_| "invalid encrypted key")?;
+    let combined = engine
+        .decode(&enc.encrypted_secret)
+        .map_err(|_| "invalid encrypted key")?;
     if combined.len() < 12 {
         return Err("ciphertext too short");
     }
@@ -137,7 +151,9 @@ pub fn decrypt_key(password: &str, enc: &EncryptedKey) -> Result<Vec<u8>, &'stat
     let mut nonce_arr = [0u8; 12];
     nonce_arr.copy_from_slice(nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_arr);
-    cipher.decrypt(nonce, ciphertext).map_err(|_| "decryption failed")
+    cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| "decryption failed")
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +170,8 @@ pub struct IdentityFile {
     pub pubkey: String,
     pub created_ms: u64,
     pub encrypted: EncryptedKey,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_unlock: bool,
 }
 
 pub fn create_identity_file(keypair: &Keypair, password: &str) -> IdentityFile {
@@ -166,6 +184,7 @@ pub fn create_identity_file(keypair: &Keypair, password: &str) -> IdentityFile {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
         encrypted: encrypt_key(password, &keypair.secret_bytes()),
+        auto_unlock: false,
     }
 }
 
@@ -177,6 +196,48 @@ pub fn load_identity_file(file: &IdentityFile, password: &str) -> Result<Keypair
         return Err("pubkey mismatch: backup file corrupted or tampered");
     }
     Ok(kp)
+}
+
+// ---------------------------------------------------------------------------
+// On-disk identity persistence (ddn_identity.json) — Phase 5
+// ---------------------------------------------------------------------------
+
+/// Path to the local identity file: `{data_dir}/ddn_identity.json`.
+pub fn identity_file_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("ddn_identity.json")
+}
+
+/// Save a keypair to disk as an `IdentityFile`.
+/// When `auto_unlock` is true the key is encrypted with an empty password
+/// so the node can auto-load it on the next startup without user interaction.
+pub fn save_identity_to_disk(
+    path: &Path,
+    keypair: &Keypair,
+    password: &str,
+    auto_unlock: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file = create_identity_file(keypair, password);
+    file.auto_unlock = auto_unlock;
+    let json = serde_json::to_string_pretty(&file)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
+/// Read the raw `IdentityFile` from disk (does not decrypt).
+pub fn read_identity_file(path: &Path) -> Result<IdentityFile, &'static str> {
+    let json = std::fs::read_to_string(path).map_err(|_| "identity file not found")?;
+    serde_json::from_str(&json).map_err(|_| "invalid identity file format")
+}
+
+/// Load an `IdentityFile` from disk and attempt to decrypt with the given
+/// password. Returns the `Keypair` on success.
+pub fn load_identity_from_disk(
+    path: &Path,
+    password: &str,
+) -> Result<(Keypair, IdentityFile), &'static str> {
+    let file = read_identity_file(path)?;
+    let kp = load_identity_file(&file, password)?;
+    Ok((kp, file))
 }
 
 // ---------------------------------------------------------------------------
@@ -193,7 +254,10 @@ pub fn seal_dm(
     recipient_ed25519_pub_hex: &str,
     plaintext: &[u8],
 ) -> Result<(String, String, String), &'static str> {
-    use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm, Nonce,
+    };
     use x25519_dalek::{PublicKey, StaticSecret};
 
     let recipient_ed = cid_to_pubkey(recipient_ed25519_pub_hex)?;
@@ -237,7 +301,10 @@ pub fn open_dm(
     nonce_b64: &str,
     ephemeral_pub_hex: &str,
 ) -> Result<Vec<u8>, &'static str> {
-    use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm, Nonce,
+    };
     use x25519_dalek::{PublicKey, StaticSecret};
 
     let our_kp = Keypair::from_bytes(our_ed25519_secret)?;
@@ -268,7 +335,9 @@ pub fn open_dm(
     );
 
     let engine = base64::engine::general_purpose::STANDARD;
-    let ct = engine.decode(ciphertext_b64).map_err(|_| "bad ciphertext base64")?;
+    let ct = engine
+        .decode(ciphertext_b64)
+        .map_err(|_| "bad ciphertext base64")?;
     let nonce_bytes = engine.decode(nonce_b64).map_err(|_| "bad nonce base64")?;
     if nonce_bytes.len() != 12 {
         return Err("nonce must be 12 bytes");
@@ -289,7 +358,8 @@ fn dm_derive_key(
     let info = [&sender_x[..], &recipient_x[..], &eph_x[..]].concat();
     let hk = Hkdf::<sha2::Sha256>::new(Some(b"ddn-dm-v1"), shared);
     let mut key = [0u8; 32];
-    hk.expand(&info, &mut key).expect("32-byte output always valid");
+    hk.expand(&info, &mut key)
+        .expect("32-byte output always valid");
     key
 }
 
@@ -301,8 +371,7 @@ fn ed25519_pub_to_x25519(ed: &[u8]) -> Result<[u8; 32], &'static str> {
     if ed.len() != 32 {
         return Err("ed25519 pubkey must be 32 bytes");
     }
-    let comp = CompressedEdwardsY::from_slice(ed)
-        .map_err(|_| "ed25519 pubkey must be 32 bytes")?;
+    let comp = CompressedEdwardsY::from_slice(ed).map_err(|_| "ed25519 pubkey must be 32 bytes")?;
     let point = comp
         .decompress()
         .ok_or("invalid ed25519 point (not on curve)")?;
@@ -362,7 +431,9 @@ mod tests {
 
         // Cross-check: compute the Montgomery u-coordinate directly via curve25519-dalek.
         let comp = curve25519_dalek::edwards::CompressedEdwardsY(ed_pub);
-        let point = comp.decompress().expect("pubkey must be a valid curve point");
+        let point = comp
+            .decompress()
+            .expect("pubkey must be a valid curve point");
         let mont = point.to_montgomery();
         let expected_x25519 = mont.to_bytes();
 
@@ -380,8 +451,7 @@ mod tests {
         let plaintext = b"hello encrypted mesh".to_vec();
         let (ct, nonce, eph) = seal_dm(&alice_pub, &bob_pub_hex, &plaintext).unwrap();
 
-        let opened =
-            open_dm(&bob.secret_bytes(), &alice_pub, &ct, &nonce, &eph).unwrap();
+        let opened = open_dm(&bob.secret_bytes(), &alice_pub, &ct, &nonce, &eph).unwrap();
         assert_eq!(opened, plaintext);
 
         // Wrong recipient must fail.
@@ -398,13 +468,17 @@ mod tests {
         assert!(Keypair::verify(&kp.public_key_bytes(), b"other", &sig.to_bytes()).is_err());
 
         // Low iteration count keeps the test fast; production uses 600k.
-        let params = KdfParams { alg: "pbkdf2-sha256".into(), iterations: 1000 };
+        let params = KdfParams {
+            alg: "pbkdf2-sha256".into(),
+            iterations: 1000,
+        };
         let file = IdentityFile {
             version: 1,
             format: "ddn-keybackup-v1".into(),
             pubkey: pubkey_to_cid(&kp.public_key_bytes()),
             created_ms: 0,
             encrypted: encrypt_key_with("hunter2", &kp.secret_bytes(), &params),
+            auto_unlock: false,
         };
         let loaded = load_identity_file(&file, "hunter2").unwrap();
         assert_eq!(loaded.public_key_bytes(), kp.public_key_bytes());
