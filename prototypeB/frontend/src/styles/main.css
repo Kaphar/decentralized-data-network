@@ -28,6 +28,26 @@ body {
   color: #fff;
 }
 
+.node-url-selector {
+  flex: 1;
+  margin: 0 1rem;
+}
+
+.node-url-selector input {
+  width: 100%;
+  padding: 0.35rem 0.5rem;
+  background: #0f0f17;
+  border: 1px solid #2a2a3a;
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-size: 0.85rem;
+}
+
+.node-url-selector input:focus {
+  outline: none;
+  border-color: #00d4ff;
+}
+
 .tabs {
   display: flex;
   border-bottom: 1px solid #222;

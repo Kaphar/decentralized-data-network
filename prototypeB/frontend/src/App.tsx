@@ -23,6 +23,8 @@ import {
   sendWebrtcSignal,
   postReaction,
   unlockIdentity,
+  setApiBase,
+  getApiBase,
   type MediaKeypair,
 } from './api';
 import type { BaseRecord, IdentityInfo, WsEvent, WsWebrtcSignalEvent, MediaRef } from './types';
@@ -94,6 +96,7 @@ export default function App() {
   const [signalEvents, setSignalEvents] = createSignal<WsWebrtcSignalEvent[]>([]);
   const [useWebRTC, setUseWebRTC] = createSignal(true);
   const [unlocked, setUnlocked] = createSignal(true);
+  const [nodeUrl, setNodeUrl] = createSignal(getApiBase() || '');
 
   const [webRTCSenders, setWebRTCSenders] = createSignal<Map<string, WebRTCSender>>(new Map());
   const [receivers, setReceivers] = createSignal<Map<string, WebRTCReceiver>>(new Map());
@@ -145,6 +148,14 @@ export default function App() {
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  function handleNodeUrlChange(url: string) {
+    setNodeUrl(url);
+    setApiBase(url);
+    loadIdentity();
+    loadWall(true);
+    loadModerationStatus();
   }
 
   async function loadModerationStatus() {
@@ -498,6 +509,14 @@ export default function App() {
     <div class="app-container">
       <header class="app-header">
         <h1>Decentralized Data Network</h1>
+        <div class="node-url-selector">
+          <input
+            type="text"
+            value={nodeUrl()}
+            placeholder="http://localhost:3000 (empty = same origin)"
+            oninput={(e) => handleNodeUrlChange((e.target as HTMLInputElement).value)}
+          />
+        </div>
         {identity() ? <IdentityBadge pubkey={identity()!.pubkey} /> : null}
       </header>
 

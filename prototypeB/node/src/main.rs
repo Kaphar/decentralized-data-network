@@ -344,7 +344,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(state)
         .layer(cors);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let http_port: u16 = std::env::var("DDN_HTTP_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3000);
+    let addr = SocketAddr::from(([0, 0, 0, 0], http_port));
     info!("DDN node listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

@@ -188,6 +188,18 @@ Since we cannot cryptographically force a node to delete data it already has, mo
 
 - **Tier 1 — Local LAN Testing (Zero Config)**: Use `libp2p::mdns` (Multicast DNS). Running multiple Rust nodes on the same local machine/Wi-Fi will automatically discover each other without any bootstrap configuration.
 - **Tier 2 — Cross-Internet Testing (Free)**: When testing with external peers, run a dedicated "Bootstrap Node" locally and expose it to the internet for free using Cloudflare Tunnels (`cloudflared`). Hardcode this tunnel address into the Rust node's config as a bootstrap peer.
+- **Multi-Node Testing**: Run multiple node instances locally by setting `DDN_HTTP_PORT`, `DDN_P2P_PORT`, and `DDN_DATA_DIR` environment variables. Each instance gets its own identity and frontend URL. Use the in-app "Node URL" input field to point any browser at any running node.
+
+  Example:
+  ```sh
+  DDN_DATA_DIR=./data1 DDN_HTTP_PORT=3001 DDN_P2P_PORT=4001 cargo run
+  DDN_DATA_DIR=./data2 DDN_HTTP_PORT=3002 DDN_P2P_PORT=4002 cargo run
+  ```
+
+## 10. Frontend Serving Options
+
+- **Option 1 (Local dev, multi-node)**: The frontend runs in a detached Vite dev server or connects to a node via the "Node URL" input field. This is ideal for development and multi-node testing — a single browser can reach any node by entering its `http://localhost:<port>` address.
+- **Option 3 (Embedded frontend per node)**: Each Rust node serves its own copy of the frontend from `dist/` via `ServeDir` (see `main.rs` `serve_frontend`). This makes each node fully self-contained — no separate web server or browser configuration needed. Recommended for production. The frontend is built via `npm run build` and copied to the node's data directory or the path specified by `DDN_FRONTEND_PATH`.
 
 ## 10. Phased Roadmap
 

@@ -14,16 +14,55 @@ import type {
   OpenDmResponse,
 } from '../types';
 
-const API_BASE = '';
+function getStoredApiBase(): string {
+  if (typeof window !== 'undefined') {
+    return window.localStorage.getItem('ddn_node_url') || '';
+  }
+  return '';
+}
+
+let apiBase: string = getStoredApiBase();
+
+export function setApiBase(url: string): void {
+  apiBase = url.replace(/\/+$/, '');
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem('ddn_node_url', apiBase);
+  }
+}
+
+export function getApiBase(): string {
+  return apiBase;
+}
+
+function resolveUrl(path: string): string {
+  const base = getApiBase();
+  return base ? `${base}${path}` : path;
+}
+
+function resolveWsUrl(path: string): string {
+  if (typeof window === 'undefined') return path;
+  const base = getApiBase();
+  if (!base) {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${window.location.host}${path}`;
+  }
+  let wsBase = base;
+  if (wsBase.startsWith('http://')) {
+    wsBase = 'ws://' + wsBase.slice(7);
+  } else if (wsBase.startsWith('https://')) {
+    wsBase = 'wss://' + wsBase.slice(8);
+  }
+  return `${wsBase}${path}`;
+}
 
 export async function fetchIdentity(): Promise<IdentityInfo> {
-  const resp = await fetch(`${API_BASE}/api/identity`);
+  const resp = await fetch(resolveUrl('/api/identity'));
   if (!resp.ok) throw new Error('Failed to fetch identity');
   return resp.json();
 }
 
 export async function backupIdentity(password: string): Promise<IdentityFile> {
-  const resp = await fetch(`${API_BASE}/api/identity/backup`, {
+  const resp = await fetch(resolveUrl('/api/identity/backup'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ password }),
@@ -36,7 +75,7 @@ export async function backupIdentity(password: string): Promise<IdentityFile> {
 }
 
 export async function exportIdentity(password: string): Promise<IdentityFile> {
-  const resp = await fetch(`${API_BASE}/api/identity/export`, {
+  const resp = await fetch(resolveUrl('/api/identity/export'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ password }),
@@ -49,7 +88,7 @@ export async function exportIdentity(password: string): Promise<IdentityFile> {
 }
 
 export async function unlockIdentity(password: string): Promise<{ pubkey: string; locked: boolean }> {
-  const resp = await fetch(`${API_BASE}/api/identity/unlock`, {
+  const resp = await fetch(resolveUrl('/api/identity/unlock'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ password }),
@@ -65,7 +104,7 @@ export async function importIdentity(
   file: IdentityFile,
   password: string,
 ): Promise<{ status: string; pubkey: string; requires_restart: boolean }> {
-  const resp = await fetch(`${API_BASE}/api/identity/import`, {
+  const resp = await fetch(resolveUrl('/api/identity/import'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ file, password }),
@@ -78,7 +117,7 @@ export async function importIdentity(
 }
 
 export async function deleteIdentity(): Promise<{ status: string; requires_restart: boolean }> {
-  const resp = await fetch(`${API_BASE}/api/identity`, {
+  const resp = await fetch(resolveUrl('/api/identity'), {
     method: 'DELETE',
   });
   if (!resp.ok) {
@@ -89,7 +128,7 @@ export async function deleteIdentity(): Promise<{ status: string; requires_resta
 }
 
 export async function uploadBlob(file: File): Promise<string> {
-  const resp = await fetch(`${API_BASE}/api/blob`, {
+  const resp = await fetch(resolveUrl('/api/blob'), {
     method: 'POST',
     body: file,
   });
@@ -105,7 +144,7 @@ export async function signRecord(
   ts: number,
   payload: unknown,
 ): Promise<BaseRecord> {
-  const resp = await fetch(`${API_BASE}/api/record/sign`, {
+  const resp = await fetch(resolveUrl('/api/record/sign'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ type: typeStr, author, prev, ts, payload }),
@@ -118,7 +157,7 @@ export async function signRecord(
 }
 
 export async function submitRecord(record: BaseRecord): Promise<{ id: string }> {
-  const resp = await fetch(`${API_BASE}/api/record`, {
+  const resp = await fetch(resolveUrl('/api/record'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(record),
@@ -141,26 +180,26 @@ export async function postReaction(
 }
 
 export async function fetchWall(): Promise<BaseRecord[]> {
-  const resp = await fetch(`${API_BASE}/api/wall`);
+  const resp = await fetch(resolveUrl('/api/wall'));
   if (!resp.ok) throw new Error('Failed to fetch wall');
   const data: WallResponse = await resp.json();
   return data.posts;
 }
 
 export async function fetchRecord(id: string): Promise<BaseRecord> {
-  const resp = await fetch(`${API_BASE}/api/record/${id}`);
+  const resp = await fetch(resolveUrl(`/api/record/${id}`));
   if (!resp.ok) throw new Error('Failed to fetch record');
   return resp.json();
 }
 
 export async function listRecords(): Promise<RecordListResponse> {
-  const resp = await fetch(`${API_BASE}/api/records`);
+  const resp = await fetch(resolveUrl('/api/records'));
   if (!resp.ok) throw new Error('Failed to fetch records');
   return resp.json();
 }
 
 export async function addPeer(url: string): Promise<{ added: string }> {
-  const resp = await fetch(`${API_BASE}/api/peers`, {
+  const resp = await fetch(resolveUrl('/api/peers'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url }),
@@ -170,13 +209,13 @@ export async function addPeer(url: string): Promise<{ added: string }> {
 }
 
 export async function fetchPeers(): Promise<PeerListResponse> {
-  const resp = await fetch(`${API_BASE}/api/peers`);
+  const resp = await fetch(resolveUrl('/api/peers'));
   if (!resp.ok) throw new Error('Failed to fetch peers');
   return resp.json();
 }
 
 export async function syncPeers(): Promise<SyncResponse> {
-  const resp = await fetch(`${API_BASE}/api/sync`, { method: 'POST' });
+  const resp = await fetch(resolveUrl('/api/sync'), { method: 'POST' });
   if (!resp.ok) throw new Error('Failed to sync');
   return resp.json();
 }
@@ -192,14 +231,14 @@ export function downloadJson(filename: string, json: string) {
 }
 
 export async function fetchNetworkStatus(): Promise<NetworkStatus> {
-  const resp = await fetch(`${API_BASE}/api/network`);
+  const resp = await fetch(resolveUrl('/api/network'));
   if (!resp.ok) throw new Error('Failed to fetch network status');
   return resp.json();
 }
 
 export async function connectToPeer(multiaddr: string): Promise<void> {
   const resp = await fetch(
-    `${API_BASE}/api/network/connect?addr=${encodeURIComponent(multiaddr)}`,
+    resolveUrl(`/api/network/connect?addr=${encodeURIComponent(multiaddr)}`),
     { method: 'POST' },
   );
   if (!resp.ok) {
@@ -213,7 +252,7 @@ export async function sealDm(
   to: string,
   plaintext: string,
 ): Promise<SealDmResponse> {
-  const resp = await fetch(`${API_BASE}/api/dm/seal`, {
+  const resp = await fetch(resolveUrl('/api/dm/seal'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ author, to, plaintext }),
@@ -231,7 +270,7 @@ export async function openDm(
   ephemeral_pubkey: string,
   sender: string,
 ): Promise<string> {
-  const resp = await fetch(`${API_BASE}/api/dm/open`, {
+  const resp = await fetch(resolveUrl('/api/dm/open'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ciphertext, nonce, ephemeral_pubkey, sender }),
@@ -250,7 +289,7 @@ export async function sendMediaOffer(
   size_bytes: number,
   ephemeral_pubkey: string,
 ): Promise<{ id: string }> {
-  const resp = await fetch(`${API_BASE}/api/media/offer`, {
+  const resp = await fetch(resolveUrl('/api/media/offer'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ to: to, file_name, size_bytes, ephemeral_pubkey }),
@@ -266,7 +305,7 @@ export async function sendMediaAccept(
   offer_cid: string,
   ephemeral_pubkey: string,
 ): Promise<{ id: string }> {
-  const resp = await fetch(`${API_BASE}/api/media/accept`, {
+  const resp = await fetch(resolveUrl('/api/media/accept'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ offer_cid, ephemeral_pubkey }),
@@ -291,7 +330,7 @@ export interface WebrtcSignalPayload {
 }
 
 export async function sendWebrtcSignal(payload: WebrtcSignalPayload): Promise<void> {
-  const resp = await fetch(`${API_BASE}/api/webrtc/signal`, {
+  const resp = await fetch(resolveUrl('/api/webrtc/signal'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ payload: btoa(JSON.stringify(payload)) }),
@@ -308,7 +347,7 @@ export interface MediaKeypair {
 }
 
 export async function reportContent(target_cid: string, reason: string): Promise<{ id: string }> {
-  const resp = await fetch(`${API_BASE}/api/report`, {
+  const resp = await fetch(resolveUrl('/api/report'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ target_cid, reason }),
@@ -321,7 +360,7 @@ export async function reportContent(target_cid: string, reason: string): Promise
 }
 
 export async function fetchModerationList(): Promise<{ blocked_cids: string[]; hidden_cids: string[]; mod_pubkeys: string[] }> {
-  const resp = await fetch(`${API_BASE}/api/moderation`);
+  const resp = await fetch(resolveUrl('/api/moderation'));
   if (!resp.ok) throw new Error('Failed to fetch moderation list');
   return resp.json();
 }
@@ -332,7 +371,7 @@ export interface MediaKeypair {
 }
 
 export async function generateMediaKeypair(): Promise<MediaKeypair> {
-  const resp = await fetch(`${API_BASE}/api/media/keypair`, { method: 'POST' });
+  const resp = await fetch(resolveUrl('/api/media/keypair'), { method: 'POST' });
   if (!resp.ok) throw new Error('Failed to generate keypair');
   return resp.json();
 }
@@ -342,9 +381,8 @@ export function subscribeEvents(
   onError?: (err: Event) => void,
   onClose?: () => void,
 ): () => void {
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsBase = `${proto}//${window.location.host}`;
-  const ws = new WebSocket(`${wsBase}/ws/events`);
+  const wsUrl = resolveWsUrl('/ws/events');
+  const ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
     console.log('[ws] connected to /ws/events');
