@@ -341,6 +341,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ws/events", get(ws_events))
         .route("/", get(serve_frontend))
         .nest_service("/static", ServeDir::new(&frontend_path))
+        .nest_service("/assets", ServeDir::new(format!("{}/assets", frontend_path)))
         .with_state(state)
         .layer(cors);
 
