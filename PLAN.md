@@ -170,12 +170,31 @@ Since we cannot cryptographically force a node to delete data it already has, mo
   - **Node-Side**: Node operators can configure their software to subscribe to a trusted mod's blocklist. The node will actively refuse to store or serve any blob matching a `nuke` action, protecting the operator from legal liability.
   - **IP Ban (Temporary)**: For emergency situations or abusive nodes, mods can issue `mod_action` records with `action: "ip_ban"` and `duration_secs` in the payload. The node extracts the connecting client's IP from the request, checks it against active IP bans (stored in memory, expiring after `duration_secs`), and returns HTTP 429 (Too Many Requests) for all API endpoints. Supports CIDR notation for IP range bans (e.g., `192.168.1.0/24`). Bans are in-memory only — they expire when the node restarts. The `target_cid` field in the payload carries the banned IP/CIDR string.
 
+## 6.2 Community Model
+
+- **Community Creation**: Any identity can "create" a community by publishing a `community` record type with payload `{ "name": "Tech Talk", "description": "...", "creator": "<creator_pubkey> }`. The creator automatically becomes the community's **founder-moderator**.
+- **Community-scoped Moderation**: The creator (and promoted moderators) can issue `mod_action` records scoped to a community by including a `community_cid` field in the payload. These actions (hide, nuke, remove_member) only apply within that community's namespace.
+- **Moderator Promotion**: The founder-moderator can publish a `community_membership` record type with payload `{ "community_cid": "<cid>", "target_pubkey": "<pubkey>", "role": "moderator" }` to promote another identity to moderator status *for that community only*. Each community maintains its own local list of trusted moderators.
+- **Cross-community Scope**: `mod_action` records without a `community_cid` field retain their global scope (network-level bans from the admin key, as described in §6).
+
 ## 7. Media Handling Strategy
 
 - **Small Media** (files ≤ 5 MB): Encrypted client-side → Uploaded to local CAS → CID shared in the post record payload's `media` array.
 - **Large Media** (files > 5 MB): Sender generates an ephemeral X25519 keypair (`POST /api/media/keypair`), publishes a `media_offer` record (`POST /api/media/offer` with `target_user`, `file_name`, `size_bytes`, `ephemeral_pubkey`). Recipient replies with `media_accept` (`POST /api/media/accept` with `offer_cid`, `ephemeral_pubkey`). Both clients use the exchanged ephemeral keys to establish a direct WebRTC Data Channel. The encrypted file streams peer-to-peer, bypassing node storage entirely.
 - **Broadcast Mode (no WebRTC)**: A frontend checkbox "Don't use WebRTC" forces **all** file uploads through the CAS blob path, regardless of file size. This overrides the 5 MB threshold and uploads the file as a blob to the local node (`POST /api/blob`), storing it on disk and serving it via `GET /api/blob/:cid`. This is simpler and works without WebRTC (no NAT traversal needed), but stores the file on the node's disk. Intended for trusted local networks or when WebRTC is undesirable (e.g., restricted networks, testing).
   - **Implementation**: Add a `useWebRTC` signal (default `true`) in `App.tsx`. Pass it as a prop to `PostForm`. When unchecked, `PostForm.handleFileChange` (`PostForm.tsx:39-68`) always calls `onBlobUpload` regardless of file size, skipping `onMediaOffer`. The `PostForm` component is at `frontend/src/components/PostForm.tsx` and the 5 MB threshold is `MEDIA_CAS_THRESHOLD` at `PostForm.tsx:4`.
+
+## 7.2 Desktop Distribution: Tauri Integration
+
+- **Background Node Process**: Package the Rust node as a sidecar binary that starts on application launch, running in the background without a visible terminal window. The SolidJS frontend runs embedded in a WebView2 (Windows) / WebKit (macOS) / WebKit2GTK (Linux) renderer inside the Tauri window.
+- **System Tray Icon** (Windows/macOS): The tray displays:
+  - A green/red indicator: green = node is running and libp2p swarm is active + WebSocket connected; red = node stopped or disconnected.
+  - Peer count and recent data transfer stats (bytes synced, records published).
+- **Tray Menu**:
+  - **Toggle Node**: Start/stop the local Rust node sidecar process. Stops all libp2p networking and halts record serving.
+  - **Open Main Window**: Launches the full SolidJS UI in a Tauri browser window (served from the embedded frontend).
+  - **Settings**: Opens a configuration dialog for `DDN_HTTP_PORT`, `DDN_P2P_PORT`, `DDN_DATA_DIR`, and bootstrap peer addresses. Persisted to a JSON config file in the user's app data directory.
+  - **Quit**: Gracefully shuts down the node and exits the application.
 
 ## 8. Reactions (Emoji Support)
 
@@ -212,4 +231,5 @@ Since we cannot cryptographically force a node to delete data it already has, mo
 | 3 | Moderation System: `report`, `mod_grant`, `mod_action` record types. `POST /api/report` endpoint. `GET /api/moderation` endpoint with blocked/hidden CIDs and mod pubkeys. Client-side report UI + moderation panel. Per-post report buttons. Node-level blocked CID enforcement (refuse `GET /api/blob/:cid`, `GET /api/record/:id`, refuse `POST /api/blob`, `POST /api/record` for nuked content). Client-side hide filtering (blur posts with `action: "hide"`). **IP Ban**: `mod_action` with `action: "ip_ban"` + `duration_secs` → in-memory CIDR IP bans, HTTP 429 for banned clients. | **Done** | ~2 weeks |
 | 4 | Reactions: `reaction` record type. Emoji buttons on posts/comments in `PostList` + `Chat`. Client-side aggregation of reactions by `target_cid` + `emoji`. Toggle/remove own reactions. | **Planned** | ~1 week |
 | 5 | Identity Persistence & Management: Save `ddn_identity.json` to `DDN_DATA_DIR` on first run. Load on subsequent startups. `POST /api/identity/unlock`, `POST /api/identity/import`, `DELETE /api/identity` endpoints. New `IdentityManager` frontend component for switch/add/remove/import. **Broadcast Mode**: "Don't use WebRTC" checkbox in `PostForm` — overrides 5 MB threshold, forces all uploads through CAS blob path. | **Planned** | ~2 weeks |
-| 6 | Hardening & Scale: Refine Rust/Tauri integration if needed. Evaluate migrating the custom CAS to IPFS/Kubo for better global chunking and NAT traversal. | Planned | Open |
+| 6.1 | **Desktop Distribution (Tauri)**: Package the Rust node as a background sidecar binary. System tray icon with green/red status indicator, peer count, data transfer stats. Tray menu: toggle node on/off, open main window, settings (ports, data dir, bootstrap peers). | **Planned** | ~3 weeks |
+| 6.2 | **Community Model**: `community` record type for creation. Community-scoped `mod_action` with `community_cid`. `community_membership` record for promoting moderators per-community. Founder-moderator auto-elected on creation. | **Planned** | ~2 weeks |
