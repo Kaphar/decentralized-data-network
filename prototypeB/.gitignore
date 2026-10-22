@@ -4,3 +4,5 @@ frontend/dist/
 data/
 *.key
 *.pem
+node/data1/*
+node/data2/*

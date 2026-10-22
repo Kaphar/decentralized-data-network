@@ -1,0 +1,5 @@
+# Terminal 1
+DDN_DATA_DIR=./data1 DDN_HTTP_PORT=3001 DDN_P2P_PORT=4001 cargo run
+
+# Terminal 2  
+DDN_DATA_DIR=./data2 DDN_HTTP_PORT=3002 DDN_P2P_PORT=4002 cargo run
