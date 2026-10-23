@@ -1,4 +1,4 @@
-import { Component, createSignal, createEffect, For } from 'solid-js';
+import { Component, createSignal, createEffect, For, Show } from 'solid-js';
 import { fetchNetworkStatus, connectToPeer } from '../api';
 import type { NetworkStatus } from '../types';
 
@@ -142,7 +142,9 @@ export const Network: Component = () => {
         </button>
       </div>
 
-      {connectError() && <div class="error-banner">{connectError()}</div>}
+      <Show when={connectError()}>
+        <div class="error-banner">{connectError()}</div>
+      </Show>
     </div>
   );
 };

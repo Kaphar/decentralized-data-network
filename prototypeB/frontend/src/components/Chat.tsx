@@ -1,5 +1,6 @@
-import { Component, createSignal, createEffect, Show, For, JSX } from 'solid-js';
+import { Component, createSignal, createEffect, Show, For } from 'solid-js';
 import type { BaseRecord } from '../types';
+import { ReactionsBar } from './ReactionsBar';
 
 export interface ChatProps {
   records: BaseRecord[];
@@ -128,57 +129,6 @@ export const Chat: Component<ChatProps> = (props) => {
   const sortedMessages = () =>
     messages().sort((a, b) => a.ts - b.ts);
 
-  const REACTION_EMOJIS = ['👍', '❤️', '😄', '😮', '😢', '😡'];
-
-  const reactionsFor = (targetCid: string) => {
-    return props.records
-      .filter((r) => r.type === 'reaction')
-      .map((r) => {
-        const p = r.payload as Record<string, unknown>;
-        return {
-          id: r.id,
-          author: r.author,
-          emoji: (p.emoji as string) ?? '',
-          target_cid: (p.target_cid as string) ?? '',
-        };
-      })
-      .filter((r) => r.target_cid === targetCid && r.emoji);
-  };
-
-  const handleReactionClick = (targetCid: string, emoji: string) => {
-    if (!props.currentPubKey || !props.onReaction) return;
-    props.onReaction(targetCid, emoji);
-  };
-
-  const renderReactions = (targetCid: string) => {
-    const reactions = reactionsFor(targetCid);
-    const mine = reactions.filter((r) => r.author === props.currentPubKey);
-    const hasReactedMap = new Map<string, string>();
-    for (const r of mine) {
-      hasReactedMap.set(r.emoji, r.id);
-    }
-
-    return (
-      <div class="reactions-bar">
-        {REACTION_EMOJIS.map((emoji) => {
-          const matching = reactions.filter((r) => r.emoji === emoji);
-          const hasReacted = hasReactedMap.has(emoji);
-          const count = matching.length;
-          return (
-            <button
-              class={`reaction-btn ${hasReacted ? 'reacted' : ''}`}
-              onclick={() => handleReactionClick(targetCid, emoji)}
-              title={hasReacted ? 'Remove your reaction' : `React with ${emoji}`}
-            >
-              {emoji}
-              {count > 0 && <span class="reaction-count">{count}</span>}
-            </button>
-          );
-        })}
-      </div>
-    );
-  };
-
   return (
     <div class="chat-container">
       <div class="form-group">
@@ -193,11 +143,13 @@ export const Chat: Component<ChatProps> = (props) => {
       <div class="chat-messages">
         <For each={sortedMessages()} fallback={<div>No messages</div>}>
           {(msg) => (
-            <MessageBubble
+           <MessageBubble
               msg={msg}
               isOwn={msg.author === props.currentPubKey}
               onDecrypt={decryptMessage}
-              reactions={renderReactions(msg.id)}
+              records={props.records}
+              currentPubKey={props.currentPubKey}
+              onReact={props.onReaction ?? (() => {})}
             />
           )}
         </For>
@@ -234,15 +186,15 @@ const MessageBubble: Component<{
   msg: BaseRecord;
   isOwn: boolean;
   onDecrypt: (record: BaseRecord) => Promise<string>;
-  reactions: JSX.Element;
+  records: BaseRecord[];
+  currentPubKey: string;
+  onReact: (targetCid: string, emoji: string) => void;
 }> = (props) => {
   const [plaintext, setPlaintext] = createSignal('[decrypting…]');
-  const [decrypted, setDecrypted] = createSignal(false);
 
   createEffect(() => {
     props.onDecrypt(props.msg).then((result) => {
       setPlaintext(result);
-      setDecrypted(true);
     });
   });
 
@@ -250,9 +202,12 @@ const MessageBubble: Component<{
     <div class="chat-message">
       <div class="sender">{props.isOwn ? 'you' : props.msg.author.slice(0, 8) + '…'}</div>
       <div class="text">{plaintext()}</div>
-      <Show when={props.reactions}>
-        {props.reactions}
-      </Show>
+      <ReactionsBar
+        records={props.records}
+        targetCid={props.msg.id}
+        currentPubKey={props.currentPubKey}
+        onReact={props.onReact}
+      />
     </div>
   );
 };

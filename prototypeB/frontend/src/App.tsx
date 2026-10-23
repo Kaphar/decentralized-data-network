@@ -686,7 +686,7 @@ export default function App() {
       </main>
 
       <footer class="app-footer">
-        <p>DDN Prototype B — Phase 5 (Identity Persistence + Reactions + Broadcast Mode)</p>
+        <p>DDN Prototype B — Phase 4 (Reactions) + Phase 5 (Identity Persistence)</p>
       </footer>
     </div>
   );

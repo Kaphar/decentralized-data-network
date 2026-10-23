@@ -84,7 +84,9 @@ export const PostForm: Component<PostFormProps> = (props) => {
         <div class="form-group">
           <div class="peer-badge">
             {preview()!.name} ({preview()!.size} bytes)
-            {preview()!.isOffer && <span class="badge badge-orange" style={{ "margin-left": "0.5rem", "font-size": "0.7rem" }}>WebRTC Offer</span>}
+            <Show when={preview()!.isOffer}>
+            <span class="badge badge-orange" style={{ "margin-left": "0.5rem", "font-size": "0.7rem" }}>WebRTC Offer</span>
+          </Show>
           </div>
           <Match when={preview()!.mime.startsWith('image/') && !preview()!.isOffer}>
             <img

@@ -1,8 +1,113 @@
-import { Component, createMemo, Show, createSignal } from 'solid-js';
-import { For } from 'solid-js';
+import { Component, createMemo, Show, For } from 'solid-js';
 import { reportContent } from '../api';
 import type { BaseRecord, MediaRef } from '../types';
 import type { MediaOfferInfo, WebRTCReceiver } from '../App';
+import { ReactionsBar } from './ReactionsBar';
+
+function OfferReceiver({ m, offer, receiver, onReceiveOffer }: {
+  m: MediaRef;
+  offer: MediaOfferInfo;
+  receiver: WebRTCReceiver | undefined;
+  onReceiveOffer: ((offer: MediaOfferInfo) => void) | undefined;
+}) {
+  return (
+    <div class="media-preview">
+      <Show when={receiver && receiver.state === 'complete' && receiver.blobUrl} fallback={
+        <Show when={receiver && receiver.state === 'transferring'} fallback={
+          <Show when={receiver && (receiver.state === 'connecting' || receiver.state === 'waiting_for_answer')} fallback={
+            <button
+              class="btn btn-secondary btn-small"
+              onClick={() => {
+                if (offer && onReceiveOffer) onReceiveOffer(offer);
+              }}
+              type="button"
+            >
+              Receive via WebRTC ({Math.round(m.size / (1024 * 1024))} MB)
+            </button>
+          }>
+            <span class="badge badge-blue">{receiver!.state}</span>
+          </Show>
+        }>
+          <div>
+            <span class="badge badge-blue">Transferring {Math.round(receiver!.progress)}%</span>
+            <div class="progress-bar" style={{ "margin-top": "0.25rem" }}>
+              <div class="progress-fill" style={{ "width": `${receiver!.progress}%` }} />
+            </div>
+          </div>
+        </Show>
+      }>
+        <div>
+          <span class="badge badge-green">Received!</span>
+          <Show when={m.mime.startsWith('video/')}>
+            <video
+              src={receiver!.blobUrl!}
+              controls
+              class="media-preview"
+              style={{ "max-width": "100%", "border-radius": "4px", "margin-top": "0.5rem" }}
+            />
+          </Show>
+          <Show when={m.mime.startsWith('audio/')}>
+            <audio
+              src={receiver!.blobUrl!}
+              controls
+              style={{ "width": "100%", "margin-top": "0.5rem" }}
+            />
+          </Show>
+          <a
+            href={receiver!.blobUrl!}
+            download={offer.file_name ?? 'file'}
+            class="btn btn-tiny"
+            style={{ "margin-top": "0.5rem" }}
+          >
+            Download
+          </a>
+        </div>
+      </Show>
+    </div>
+  );
+}
+
+function MediaRenderer({ m, offersMap, receivers, onReceiveOffer }: {
+  m: MediaRef;
+  offersMap: Map<string, MediaOfferInfo>;
+  receivers?: Map<string, WebRTCReceiver>;
+  onReceiveOffer?: (offer: MediaOfferInfo) => void;
+}) {
+  if (m.isOffer) {
+    const offer = offersMap.get(m.cid);
+    if (!offer) return null;
+    const receiver = receivers?.get(m.cid);
+    return (
+      <OfferReceiver
+        m={m}
+        offer={offer}
+        receiver={receiver}
+        onReceiveOffer={onReceiveOffer}
+      />
+    );
+  }
+
+  return (
+    <>
+      <Show when={m.mime.startsWith('image/')}>
+        <img src={`/api/blob/${m.cid}`} alt="media" class="media-preview" />
+      </Show>
+      <Show when={m.mime.startsWith('video/')}>
+        <video src={`/api/blob/${m.cid}`} controls class="media-preview" style={{ "max-width": "100%", "border-radius": "4px" }} />
+      </Show>
+      <Show when={m.mime.startsWith('audio/')}>
+        <audio src={`/api/blob/${m.cid}`} controls style={{ "width": "100%", "margin-top": "0.5rem" }} />
+      </Show>
+      <Show when={
+        !m.mime.startsWith('image/') &&
+        !m.mime.startsWith('video/') &&
+        !m.mime.startsWith('audio/')
+      }>
+        <div class="media-preview">[{m.mime}] {m.size} bytes</div>
+      </Show>
+    </>
+  );
+}
 
 export interface PostListProps {
   records: BaseRecord[];
@@ -76,74 +181,7 @@ export const PostList: Component<PostListProps> = (props) => {
   };
 
   const hiddenSet = new Set(props.hiddenCids ?? []);
-  const [hiddenReactions, setHiddenReactions] = createSignal<Set<string>>(new Set());
-
   const myPubKey = () => props.currentPubKey ?? '';
-
-  const REACTION_EMOJIS = ['👍', '❤️', '😄', '😮', '😢', '😡'];
-
-  const reactionsFor = (targetCid: string) => {
-    return props.records
-      .filter((r) => r.type === 'reaction')
-      .map((r) => {
-        const p = r.payload as Record<string, unknown>;
-        return {
-          id: r.id,
-          author: r.author,
-          emoji: (p.emoji as string) ?? '',
-          target_cid: (p.target_cid as string) ?? '',
-        };
-      })
-      .filter((r) => r.target_cid === targetCid && r.emoji);
-  };
-
-  const handleReactionClick = (targetCid: string, emoji: string) => {
-    if (!myPubKey() || !props.onReaction) return;
-    props.onReaction(targetCid, emoji);
-  };
-
-  const toggleReaction = (reactionId: string) => {
-    const current = new Set(hiddenReactions());
-    if (current.has(reactionId)) {
-      current.delete(reactionId);
-    } else {
-      current.add(reactionId);
-    }
-    setHiddenReactions(current);
-  };
-
-  const renderReactions = (targetCid: string) => {
-    const reactions = reactionsFor(targetCid);
-    const hidden = hiddenReactions();
-    const visible = reactions.filter((r) => !hidden.has(r.id));
-
-    return (
-      <div class="reactions-bar">
-        {REACTION_EMOJIS.map((emoji) => {
-          const matching = visible.filter((r) => r.emoji === emoji);
-          const hasReacted = matching.some((r) => r.author === myPubKey());
-          const count = matching.length;
-          return (
-            <button
-              class={`reaction-btn ${hasReacted ? 'reacted' : ''}`}
-              onclick={() => {
-                if (hasReacted) {
-                  // Locally remove own reactions (cannot delete from network)
-                  matching.filter((r) => r.author === myPubKey()).forEach((r) => toggleReaction(r.id));
-                } else {
-                  handleReactionClick(targetCid, emoji);
-                }
-              }}
-              title={hasReacted ? 'Click to remove your reaction' : `React with ${emoji}`}
-            >
-              {emoji}
-              {count > 0 && <span class="reaction-count">{count}</span>}
-            </button>
-          );
-        })}
-      </div>
-    );
-  };
 
   return (
     <div class="post-list">
@@ -183,74 +221,21 @@ export const PostList: Component<PostListProps> = (props) => {
               </Show>
               <div class="content">{getPostPayload(record).text}</div>
               <For each={getPostPayload(record).media}>
-                {(m) =>
-                  m.isOffer ? (() => {
-                    const offer = offersMap().get(m.cid);
-                    const getReceiver = createMemo(() => props.receivers?.get(m.cid));
-                    const r = getReceiver();
-                    return (
-                      <div class="media-preview">
-                        {r && r.state === 'complete' && r.blobUrl ? (
-                          <div>
-                            <span class="badge badge-green">Received!</span>
-                            {m.mime.startsWith('video/') ? (
-                              <video
-                                src={r.blobUrl}
-                                controls
-                                class="media-preview"
-                                style={{ "max-width": "100%", "border-radius": "4px", "margin-top": "0.5rem" }}
-                              />
-                            ) : m.mime.startsWith('audio/') ? (
-                              <audio
-                                src={r.blobUrl}
-                                controls
-                                style={{ "width": "100%", "margin-top": "0.5rem" }}
-                              />
-                            ) : null}
-                            <a
-                              href={r.blobUrl}
-                              download={offer?.file_name ?? 'file'}
-                              class="btn btn-tiny"
-                              style={{ "margin-top": "0.5rem" }}
-                            >
-                              Download
-                            </a>
-                          </div>
-                        ) : r && r.state === 'transferring' ? (
-                          <div>
-                            <span class="badge badge-blue">Transferring {Math.round(r.progress)}%</span>
-                            <div class="progress-bar" style={{ "margin-top": "0.25rem" }}>
-                              <div class="progress-fill" style={{ "width": `${r.progress}%` }} />
-                            </div>
-                          </div>
-                        ) : r && (r.state === 'connecting' || r.state === 'waiting_for_answer') ? (
-                          <span class="badge badge-blue">{r.state}</span>
-                        ) : (
-                          <button
-                            class="btn btn-secondary btn-small"
-                            onclick={() => {
-                              if (offer && props.onReceiveOffer) {
-                                props.onReceiveOffer(offer);
-                              }
-                            }}
-                          >
-                            Receive via WebRTC ({Math.round(m.size / (1024 * 1024))} MB)
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })() : m.mime.startsWith('image/') ? (
-                    <img src={`/api/blob/${m.cid}`} alt="media" class="media-preview" />
-                  ) : m.mime.startsWith('video/') ? (
-                    <video src={`/api/blob/${m.cid}`} controls class="media-preview" style={{ "max-width": "100%", "border-radius": "4px" }} />
-                  ) : m.mime.startsWith('audio/') ? (
-                    <audio src={`/api/blob/${m.cid}`} controls style={{ "width": "100%", "margin-top": "0.5rem" }} />
-                  ) : (
-                    <div class="media-preview">[{m.mime}] {m.size} bytes</div>
-                  )
-                }
+                {(m) => (
+                  <MediaRenderer
+                    m={m}
+                    offersMap={offersMap()}
+                    receivers={props.receivers}
+                    onReceiveOffer={props.onReceiveOffer}
+                  />
+                )}
               </For>
-              {renderReactions(record.id)}
+              <ReactionsBar
+                records={props.records}
+                targetCid={record.id}
+                currentPubKey={myPubKey()}
+                onReact={props.onReaction ?? (() => {})}
+              />
               <For each={getCommentsFor(record.id)}>
                 {(comment) => {
                   const p = comment.payload as Record<string, unknown>;
@@ -268,7 +253,12 @@ export const PostList: Component<PostListProps> = (props) => {
                         <div class="warning-banner" style={{ "font-size": "0.7rem" }}>Hidden by moderation</div>
                       </Show>
                       <div class="comment-content">{p.text as string}</div>
-                      {renderReactions(comment.id)}
+                      <ReactionsBar
+                      records={props.records}
+                      targetCid={comment.id}
+                      currentPubKey={myPubKey()}
+                      onReact={props.onReaction ?? (() => {})}
+                    />
                     </div>
                   );
                 }}

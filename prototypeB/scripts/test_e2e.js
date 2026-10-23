@@ -297,15 +297,57 @@ async function runTests() {
     log('identity file removed from disk', 'detail');
   });
 
-  // ── TODO: Phase 4 — Reactions ───────────────────────────────────
-  log('--- TODO: Reactions (Phase 4) ---', 'todo');
-  log('  Placeholder: post a reaction record, verify aggregation in PostList', 'todo');
-  log('  Endpoint: POST /api/record (type=reaction, payload={target_cid, emoji})', 'todo');
+  // ── Phase 4: Reactions ───────────────────────────────────────────
+  test('post a reaction on node1', async () => {
+    const signed = await api(PORT_1, '/api/record/sign', {
+      method: 'POST',
+      body: JSON.stringify({
+        type: 'reaction',
+        author: id1.pubkey,
+        prev: null,
+        ts: Date.now(),
+        payload: { target_cid: recordId, emoji: '👍' },
+      }),
+    });
+    await api(PORT_1, '/api/record', {
+      method: 'POST',
+      body: JSON.stringify(signed),
+    });
+    log(`reaction record: ${signed.id.slice(0, 16)}...`, 'detail');
+  });
 
-  // ── TODO: Phase 5 — Import Identity ───────────────────────────────
-  log('--- TODO: Identity Import (Phase 5) ---', 'todo');
-  log('  Placeholder: POST /api/identity/import with backup file + password', 'todo');
-  log('  Requires node restart to take effect (PeerId is derived from Ed25519 secret)', 'todo');
+  test('sync propagates reaction to node2', async () => {
+    await api(PORT_2, '/api/sync', { method: 'POST' });
+    await sleep(SLOW ? 2000 : 300);
+    const records = await api(PORT_2, '/api/records');
+    const hasReaction = records.records.some((r) => r.type === 'reaction');
+    if (!hasReaction) throw new Error('Reaction record not found on node2');
+  });
+
+  // ── Phase 5: Import Identity ─────────────────────────────────────
+  test('import identity backup onto node1', async () => {
+    if (fs.existsSync(path.join(DATA_DIR_1, 'ddn_identity.json'))) {
+      throw new Error('node1 identity file still exists — delete test may have failed');
+    }
+    const backup = await api(PORT_2, '/api/identity/export', {
+      method: 'POST',
+      body: JSON.stringify({ password: 'testpassword123' }),
+    });
+    log(`importing backup with pubkey: ${backup.pubkey.slice(0, 16)}...`, 'detail');
+
+    const result = await api(PORT_1, '/api/identity/import', {
+      method: 'POST',
+      body: JSON.stringify({ file: backup, password: 'testpassword123' }),
+    });
+    if (result.status !== 'imported') throw new Error('Import did not return status=imported');
+    log(`import result: ${JSON.stringify(result)}`, 'detail');
+  });
+
+  test('identity file exists on disk after import', async () => {
+    const idPath = path.join(DATA_DIR_1, 'ddn_identity.json');
+    if (!fs.existsSync(idPath)) throw new Error('Identity file not created after import');
+    log('identity file written to disk', 'detail');
+  });
 
   // ── TODO: Phase 6.1 — Tauri Desktop ──────────────────────────────
   log('--- TODO: Tauri Desktop (Phase 6.1) ---', 'todo');
