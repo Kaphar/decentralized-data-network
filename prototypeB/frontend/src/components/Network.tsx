@@ -54,77 +54,77 @@ export const Network: Component = () => {
     <div class="network-view">
       <h3>Network Status</h3>
 
-      {loading() ? (
+      <Show when={loading()}>
         <div class="loading">Loading network info...</div>
-      ) : status() ? (
-        <>
+      </Show>
+      <Show when={!loading() && status()}>
+        <div class="info-row">
+          <span class="label">P2P Enabled:</span>
+          <span class={status()!.enabled ? 'text-ok' : 'text-warn'}>
+            {status()!.enabled ? 'Yes' : 'No'}
+          </span>
+        </div>
+
+        <Show when={status()!.peer_id}>
           <div class="info-row">
-            <span class="label">P2P Enabled:</span>
-            <span class={status()!.enabled ? 'text-ok' : 'text-warn'}>
-              {status()!.enabled ? 'Yes' : 'No'}
+            <span class="label">Peer ID:</span>
+            <span class="monospace" title={status()!.peer_id}>
+              <button class="btn btn-tiny" onclick={copyPeerId}>
+                {status()!.peer_id!.slice(0, 12)}...{status()!.peer_id!.slice(-12)}
+              </button>
             </span>
           </div>
+        </Show>
 
-          {status()!.peer_id && (
-            <div class="info-row">
-              <span class="label">Peer ID:</span>
-              <span class="monospace" title={status()!.peer_id}>
-                <button class="btn btn-tiny" onclick={copyPeerId}>
-                  {status()!.peer_id!.slice(0, 12)}...{status()!.peer_id!.slice(-12)}
-                </button>
-              </span>
-            </div>
-          )}
-
-          {status()!.listen_addrs && status()!.listen_addrs!.length > 0 && (
-            <div class="info-row">
-              <span class="label">Listen Addresses:</span>
-              <ul class="addr-list">
-                <li class="monospace">{status()!.listen_addrs![0]}</li>
-              </ul>
-            </div>
-          )}
-
-          {status()!.topic && (
-            <div class="info-row">
-              <span class="label">Topic:</span>
-              <span class="monospace">{status()!.topic}</span>
-            </div>
-          )}
-
+        <Show when={status()!.listen_addrs && status()!.listen_addrs!.length > 0}>
           <div class="info-row">
-            <span class="label">Connected Peers:</span>
-            <span>{status()!.connected_peers?.length ?? 0}</span>
-            {status()!.connected_peers && status()!.connected_peers!.length > 0 && (
-              <ul class="peer-sublist">
-                <For each={status()!.connected_peers}>
-                  {(p) => <li class="monospace">{p}</li>}
-                </For>
-              </ul>
-            )}
+            <span class="label">Listen Addresses:</span>
+            <ul class="addr-list">
+              <li class="monospace">{status()!.listen_addrs![0]}</li>
+            </ul>
           </div>
+        </Show>
 
-          {status()!.reason && (
-            <div class="info-row">
-              <span class="label">Note:</span>
-              <span class="text-warn">{status()!.reason}</span>
-            </div>
-          )}
+        <Show when={status()!.topic}>
+          <div class="info-row">
+            <span class="label">Topic:</span>
+            <span class="monospace">{status()!.topic}</span>
+          </div>
+        </Show>
 
-          {status()!.manual_peers && status()!.manual_peers!.length > 0 && (
-            <div class="info-row">
-              <span class="label">Manual Peers:</span>
-              <ul class="peer-sublist">
-                <For each={status()!.manual_peers}>
-                  {(p) => <li>{p}</li>}
-                </For>
-              </ul>
-            </div>
-          )}
-        </>
-      ) : (
+        <div class="info-row">
+          <span class="label">Connected Peers:</span>
+          <span>{status()!.connected_peers?.length ?? 0}</span>
+          <Show when={status()!.connected_peers && status()!.connected_peers!.length > 0}>
+            <ul class="peer-sublist">
+              <For each={status()!.connected_peers}>
+                {(p) => <li class="monospace">{p}</li>}
+              </For>
+            </ul>
+          </Show>
+        </div>
+
+        <Show when={status()!.reason}>
+          <div class="info-row">
+            <span class="label">Note:</span>
+            <span class="text-warn">{status()!.reason}</span>
+          </div>
+        </Show>
+
+        <Show when={status()!.manual_peers && status()!.manual_peers!.length > 0}>
+          <div class="info-row">
+            <span class="label">Manual Peers:</span>
+            <ul class="peer-sublist">
+              <For each={status()!.manual_peers}>
+                {(p) => <li>{p}</li>}
+              </For>
+            </ul>
+          </div>
+        </Show>
+      </Show>
+      <Show when={!loading() && !status()}>
         <div class="error-banner">Failed to load network status</div>
-      )}
+      </Show>
 
       <div class="form-group">
         <input

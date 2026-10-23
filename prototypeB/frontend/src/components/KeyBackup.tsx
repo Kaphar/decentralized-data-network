@@ -77,7 +77,7 @@ export const KeyBackup: Component = () => {
             {status() === 'backing-up' ? 'Backing up...' : 'Generate Backup'}
           </button>
         </form>
-          <Show when={error()}>
+        <Show when={error()}>
           <div class="error-banner">{error()}</div>
         </Show>
       </Show>
