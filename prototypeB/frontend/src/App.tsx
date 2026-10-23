@@ -3,10 +3,12 @@ import { PostList } from './components/PostList';
 import { PostForm } from './components/PostForm';
 import { Chat } from './components/Chat';
 import { IdentityBadge } from './components/IdentityBadge';
+import type { IdentityAction } from './components/IdentityBadge';
 import { PeerManager } from './components/PeerManager';
 import { Network } from './components/Network';
 import { KeyBackup } from './components/KeyBackup';
 import { IdentityManager } from './components/IdentityManager';
+import type { IdentityAction as ManagerAction } from './components/IdentityManager';
 import { Moderation } from './components/Moderation';
 import { FileTransfer } from './components/FileTransfer';
 import {
@@ -23,6 +25,7 @@ import {
   sendWebrtcSignal,
   postReaction,
   unlockIdentity,
+  deleteIdentity,
   setApiBase,
   getApiBase,
   type MediaKeypair,
@@ -91,11 +94,11 @@ export default function App() {
   const [refreshing, setRefreshing] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [activeTab, setActiveTab] = createSignal('wall');
+  const [settingsAction, setSettingsAction] = createSignal<ManagerAction>('export');
   const [wsConnected, setWsConnected] = createSignal(false);
   const [hiddenCids, setHiddenCids] = createSignal<string[]>([]);
   const [signalEvents, setSignalEvents] = createSignal<WsWebrtcSignalEvent[]>([]);
   const [useWebRTC, setUseWebRTC] = createSignal(true);
-  const [unlocked, setUnlocked] = createSignal(true);
   const [nodeUrl, setNodeUrl] = createSignal(getApiBase() || '');
 
   const [webRTCSenders, setWebRTCSenders] = createSignal<Map<string, WebRTCSender>>(new Map());
@@ -121,7 +124,6 @@ export default function App() {
     try {
       const info = await fetchIdentity();
       setIdentity(info);
-      setUnlocked(!info.locked);
     } catch (e) {
       setError(String(e));
     }
@@ -131,7 +133,6 @@ export default function App() {
     try {
       const result = await unlockIdentity(password);
       setIdentity((prev) => prev ? { ...prev, locked: result.locked } : null);
-      setUnlocked(true);
       setError(null);
       await loadWall(true);
       await loadModerationStatus();
@@ -156,6 +157,41 @@ export default function App() {
     loadIdentity();
     loadWall(true);
     loadModerationStatus();
+  }
+
+  async function handleIdentityAction(action: IdentityAction) {
+    switch (action) {
+      case 'unlock':
+      case 'export':
+      case 'switch':
+        setActiveTab('settings');
+        setSettingsAction(action === 'switch' ? 'import' : 'export');
+        break;
+      case 'create': {
+        if (!confirm('Create a new identity? This permanently replaces the current identity. A new one will be generated on next restart.')) return;
+        try {
+          await deleteIdentity();
+          setError('Identity removed. Restart the node to generate a new identity.');
+          setTimeout(() => setError(null), 5000);
+          loadIdentity();
+        } catch (e) {
+          setError(String(e));
+        }
+        break;
+      }
+      case 'remove': {
+        if (!confirm('Remove identity? A new one will be generated on next restart.')) return;
+        try {
+          await deleteIdentity();
+          setError('Identity removed. Restart the node to generate a new identity.');
+          setTimeout(() => setError(null), 5000);
+          loadIdentity();
+        } catch (e) {
+          setError(String(e));
+        }
+        break;
+      }
+    }
   }
 
   async function loadModerationStatus() {
@@ -517,10 +553,14 @@ export default function App() {
             oninput={(e) => handleNodeUrlChange((e.target as HTMLInputElement).value)}
           />
         </div>
-        {identity() ? <IdentityBadge pubkey={identity()!.pubkey} /> : null}
+      <Show when={identity()}>
+        <IdentityBadge identity={identity()!} onAction={handleIdentityAction} />
+      </Show>
       </header>
 
-      {error() ? <div class="error-banner">{error()}</div> : null}
+      <Show when={error()}>
+        <div class="error-banner">{error()}</div>
+      </Show>
       <Show when={wsConnected()}>
         <div class="ws-status">Live updates connected</div>
       </Show>
@@ -542,8 +582,8 @@ export default function App() {
         <a href="#" class={activeTab() === 'peers' ? 'active' : ''} onclick={() => setActiveTab('peers')}>
           Peers
         </a>
-        <a href="#" class={activeTab() === 'backup' ? 'active' : ''} onclick={() => setActiveTab('backup')}>
-          Backup
+        <a href="#" class={activeTab() === 'settings' ? 'active' : ''} onclick={() => setActiveTab('settings')}>
+          Settings
         </a>
         <a href="#" class={activeTab() === 'moderation' ? 'active' : ''} onclick={() => setActiveTab('moderation')}>
           Moderation
@@ -571,11 +611,11 @@ export default function App() {
             <PeerManager onSync={handleSync} />
           </aside>
           <section class="feed">
-            {initialLoad() ? (
-              <div class="loading">Loading...</div>
-            ) : (
+            <Show when={initialLoad()} fallback={
               <>
-                {refreshing() ? <div class="refresh-indicator">Updating...</div> : null}
+                <Show when={refreshing()}>
+                  <div class="refresh-indicator">Updating...</div>
+                </Show>
                 <PostList
                   records={records()}
                   hiddenCids={hiddenCids()}
@@ -585,7 +625,9 @@ export default function App() {
                   onReceiveOffer={startReceive}
                 />
               </>
-            )}
+            }>
+              <div class="loading">Loading...</div>
+            </Show>
           </section>
         </Show>
 
@@ -609,16 +651,21 @@ export default function App() {
           </section>
         </Show>
 
-        <Show when={activeTab() === 'backup'}>
-          <div class="backup-view">
+        <Show when={activeTab() === 'settings'}>
+          <div class="settings-view">
             <KeyBackup />
             <IdentityManager
               currentPubKey={identity()?.pubkey ?? ''}
-              locked={unlocked() ? false : (identity()?.locked ?? false)}
+              locked={identity()?.locked ?? false}
+              autoUnlock={identity()?.auto_unlock}
+              defaultAction={settingsAction()}
               onUnlock={handleUnlock}
               onIdentityDeleted={() => {
                 setIdentity(null);
-                setUnlocked(false);
+                loadIdentity();
+              }}
+              onIdentityImported={() => {
+                loadIdentity();
               }}
             />
           </div>

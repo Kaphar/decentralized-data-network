@@ -1,22 +1,33 @@
-import { Component, createSignal, Show } from 'solid-js';
+import { Component, createSignal, Show, createEffect } from 'solid-js';
 import {
   backupIdentity,
   downloadJson,
-  unlockIdentity,
   importIdentity,
   deleteIdentity,
 } from '../api';
 import type { IdentityFile } from '../types';
 
+export type IdentityAction = 'export' | 'import' | 'remove' | 'create';
+
 export interface IdentityManagerProps {
   currentPubKey: string;
   locked: boolean;
+  autoUnlock?: boolean;
+  defaultAction?: IdentityAction;
   onUnlock: (password: string) => Promise<void>;
   onIdentityDeleted: () => void;
+  onIdentityImported?: () => void;
 }
 
+const ACTION_LABELS: Record<IdentityAction, string> = {
+  export: 'Export / Backup',
+  import: 'Switch Identity (Import)',
+  remove: 'Remove Identity',
+  create: 'Create New Identity',
+};
+
 export const IdentityManager: Component<IdentityManagerProps> = (props) => {
-  const [tab, setTab] = createSignal<'export' | 'import' | 'remove'>('export');
+  const [action, setAction] = createSignal<IdentityAction>(props.defaultAction ?? 'export');
   const [password, setPassword] = createSignal('');
   const [importFile, setImportFile] = createSignal<IdentityFile | null>(null);
   const [importPassword, setImportPassword] = createSignal('');
@@ -27,6 +38,13 @@ export const IdentityManager: Component<IdentityManagerProps> = (props) => {
     if (!s) return '(no identity)';
     return s.length <= 32 ? s : `${s.slice(0, 16)}…${s.slice(-16)}`;
   };
+
+  createEffect(() => {
+    const next = props.defaultAction ?? 'export';
+    if (next !== action()) {
+      setAction(next);
+    }
+  });
 
   const handleExport = async () => {
     if (props.locked) {
@@ -89,6 +107,7 @@ export const IdentityManager: Component<IdentityManagerProps> = (props) => {
       });
       setImportFile(null);
       setImportPassword('');
+      props.onIdentityImported?.();
     } catch (e) {
       setStatus({ msg: String(e), ok: false });
     } finally {
@@ -111,6 +130,21 @@ export const IdentityManager: Component<IdentityManagerProps> = (props) => {
     }
   };
 
+  const handleCreateNew = async () => {
+    if (!confirm('Create a new identity? This will permanently delete the current identity. A new one will be generated on next restart. Your old data will not be accessible.')) return;
+    setWorking(true);
+    setStatus(null);
+    try {
+      await deleteIdentity();
+      setStatus({ msg: 'Current identity removed. Restart the node to generate a fresh identity.', ok: true });
+      props.onIdentityDeleted();
+    } catch (e) {
+      setStatus({ msg: String(e), ok: false });
+    } finally {
+      setWorking(false);
+    }
+  };
+
   return (
     <div class="identity-manager">
       <h3>Identity Management</h3>
@@ -121,6 +155,22 @@ export const IdentityManager: Component<IdentityManagerProps> = (props) => {
           {truncate(props.currentPubKey)}
         </span>
       </div>
+
+      <div class="info-row">
+        <span class="label">Lock Status:</span>
+        <span class={props.locked ? 'text-warn' : 'text-ok'}>
+          {props.locked ? 'Locked' : 'Unlocked'}
+        </span>
+      </div>
+
+      <Show when={typeof props.autoUnlock === 'boolean'}>
+        <div class="info-row">
+          <span class="label">Auto-Unlock:</span>
+          <span class={props.autoUnlock ? 'text-ok' : 'text-warn'}>
+            {props.autoUnlock ? 'Yes (password-free startup)' : 'No (password required on each restart)'}
+          </span>
+        </div>
+      </Show>
 
       <Show when={props.locked}>
         <div class="error-banner" style={{ "margin-bottom": "0.5rem" }}>
@@ -153,37 +203,28 @@ export const IdentityManager: Component<IdentityManagerProps> = (props) => {
       </Show>
 
       <Show when={!props.locked}>
-        <div class="tabs" style={{ "margin-bottom": "0.5rem" }}>
-          <a
-            href="#"
-            class={tab() === 'export' ? 'active' : ''}
-            onclick={() => setTab('export')}
-          >
-            Export / Backup
-          </a>
-          <a
-            href="#"
-            class={tab() === 'import' ? 'active' : ''}
-            onclick={() => setTab('import')}
-          >
-            Import
-          </a>
-          <a
-            href="#"
-            class={tab() === 'remove' ? 'active' : ''}
-            onclick={() => setTab('remove')}
-          >
-            Remove
-          </a>
-        </div>
-
         <Show when={status()}>
           <div class={status()!.ok ? 'success-banner' : 'error-banner'}>
             {status()!.msg}
           </div>
         </Show>
 
-        <Show when={tab() === 'export'}>
+        <div class="form-group">
+          <label for="identity-action-select" class="label">Switch action:</label>
+          <select
+            id="identity-action-select"
+            class="identity-action-select"
+            value={action()}
+            onchange={(e) => setAction((e.target as HTMLSelectElement).value as IdentityAction)}
+          >
+            <option value="export">{ACTION_LABELS.export}</option>
+            <option value="import">{ACTION_LABELS.import}</option>
+            <option value="create">{ACTION_LABELS.create}</option>
+            <option value="remove">{ACTION_LABELS.remove}</option>
+          </select>
+        </div>
+
+        <Show when={action() === 'export'}>
           <form
             class="form-group"
             onSubmit={(e) => {
@@ -209,7 +250,7 @@ export const IdentityManager: Component<IdentityManagerProps> = (props) => {
           </form>
         </Show>
 
-        <Show when={tab() === 'import'}>
+        <Show when={action() === 'import'}>
           <div class="form-group">
             <input
               type="file"
@@ -253,7 +294,7 @@ export const IdentityManager: Component<IdentityManagerProps> = (props) => {
           </Show>
         </Show>
 
-        <Show when={tab() === 'remove'}>
+        <Show when={action() === 'remove'}>
           <p class="hint">
             Deleting your identity removes the local key file. On next startup,
             a fresh identity will be generated. Your old data will not be
@@ -266,6 +307,23 @@ export const IdentityManager: Component<IdentityManagerProps> = (props) => {
             disabled={working()}
           >
             {working() ? 'Removing...' : 'Remove Identity'}
+          </button>
+        </Show>
+
+        <Show when={action() === 'create'}>
+          <p class="hint">
+            This will permanently delete the current identity and generate a
+            completely new one on the next node restart. The new identity will
+            have a different pubkey/CID and will not have access to any data
+            associated with the old identity.
+          </p>
+          <button
+            class="btn btn-primary"
+            style={{ "background": "#1a3a2a", "color": "#4ade80" }}
+            onclick={handleCreateNew}
+            disabled={working()}
+          >
+            {working() ? 'Creating...' : 'Create New Identity'}
           </button>
         </Show>
       </Show>

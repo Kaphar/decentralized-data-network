@@ -30,12 +30,20 @@ The node serves the frontend automatically from `DDN_FRONTEND_PATH` (defaults to
 |---|---|---|
 | `DDN_DATA_DIR` | `./data` | Where blobs and records are stored on disk |
 | `DDN_FRONTEND_PATH` | `./frontend` | Path to the built frontend directory |
+| `DDN_HTTP_PORT` | `3000` | HTTP server listen port |
+| `DDN_P2P_PORT` | `4001` | libp2p P2P listen port |
+| `DDN_BOOTSTRAP_PEERS` | (empty) | Comma-separated list of bootstrap multiaddrs |
 
 ## API Reference
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/identity` | Get this node's public key (user identity) |
+| `GET` | `/api/identity` | Get this node's public key, lock status, and auto_unlock flag |
+| `POST` | `/api/identity/backup` | Export encrypted identity backup (body: `{password}`) |
+| `POST` | `/api/identity/export` | Alias for `/api/identity/backup` |
+| `POST` | `/api/identity/unlock` | Unlock identity with password (body: `{password}`) |
+| `POST` | `/api/identity/import` | Import an identity file (body: `{file, password}`) — requires restart |
+| `DELETE` | `/api/identity` | Delete identity file — fresh identity on next restart |
 | `POST` | `/api/blob` | Upload a binary blob (media, files) |
 | `GET` | `/api/blob/:cid` | Download a blob by its content ID |
 | `GET` | `/api/blob` | List all stored blob CIDs |
@@ -66,6 +74,47 @@ cd prototypeB/node && cargo check
 cd prototypeB/scripts && bash gen_keys.sh ../data/dev_keys.json
 # (Windows: powershell -File gen_keys.ps1 -Output ../data/dev_keys.json)
 ```
+
+## End-to-End Test (slows 2 nodes)
+
+The e2e test script launches **two** Rust nodes on separate ports with isolated data
+directories, then exercises the core API surface: identity, peer sync, posting,
+E2EE DMs, blob upload, moderation, and identity management.
+
+```bash
+# From the prototypeB directory:
+# Bash (Linux/macOS):
+cd prototypeB
+bash scripts/test_e2e.sh
+
+# PowerShell (Windows):
+cd prototypeB
+pwsh -File scripts/test_e2e.ps1
+
+# Slow mode — adds 3-second delays between test steps so you can watch
+# the nodes gossip and sync in real time (useful for debugging):
+bash scripts/test_e2e.sh --slow
+# or
+pwsh -File scripts/test_e2e.ps1 -Slow
+```
+
+Both nodes are started with `cargo run --release` using the following configuration:
+
+| Node | HTTP Port | P2P Port | Data Dir |
+|------|-----------|----------|----------|
+| 1    | 3001      | 4001     | `%TEMP%/ddn-test-data1` |
+| 2    | 3002      | 4002     | `%TEMP%/ddn-test-data2` |
+
+Test phases covered:
+- **Identity** — distinct pubkeys, auto-unlock status
+- **Peer sync** — connect node2 to node1, sync records
+- **Posting** — sign + submit a post, verify it appears on the wall and gossips to the peer
+- **E2EE DMs** — seal/open a direct message between the two nodes
+- **Blobs** — upload and fetch a blob by CID
+- **Moderation** — report content, query moderation list
+- **Identity management** — export backup, unlock failure on wrong password, delete identity
+
+Placeholders are included for future phases (reactions, community model, Tauri desktop).
 
 ## Frontend Development
 

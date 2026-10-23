@@ -293,6 +293,62 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.2s;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.identity-badge:hover {
+  border-color: #00d4ff;
+}
+
+.identity-badge-dropdown {
+  position: relative;
+  display: inline-block;
+}
+
+.identity-badge__lock {
+  font-size: 0.85rem;
+}
+
+.identity-dropdown-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 1000;
+  min-width: 200px;
+  background: #12121a;
+  border: 1px solid #2a2a3a;
+  border-radius: 6px;
+  padding: 0.25rem 0;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  margin-top: 0.25rem;
+}
+
+.identity-dropdown-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.4rem 0.75rem;
+  background: none;
+  border: none;
+  color: #e0e0e0;
+  font-size: 0.8rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.identity-dropdown-item:hover {
+  background: #0f0f17;
+  color: #00d4ff;
+}
+
+.identity-dropdown-item--destructive:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
 }
 
 .chat-container {
@@ -649,6 +705,7 @@ body {
   font-size: 0.85rem;
   cursor: pointer;
   transition: all 0.15s ease;
+  font-family: 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', 'Android Emoji', sans-serif;
 }
 
 .reaction-btn:hover {
@@ -692,10 +749,28 @@ body {
   margin: 0.25rem 0;
 }
 
-.backup-view {
+.identity-manager .identity-action-select {
+  display: block;
+  width: 100%;
+  background: #0f0f17;
+  border: 1px solid #2a2a3a;
+  border-radius: 6px;
+  padding: 0.4rem 0.75rem;
+  color: #e0e0e0;
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+  cursor: pointer;
+}
+
+.identity-manager .identity-action-select:focus {
+  outline: none;
+  border-color: #00d4ff;
+}
+
+.settings-view {
   padding: 1rem;
 }
 
-.backup-view .tabs {
+.settings-view .tabs {
   margin-bottom: 1rem;
 }

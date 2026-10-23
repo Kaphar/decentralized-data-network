@@ -33,6 +33,7 @@ struct AppState {
     pub_key: String,
     locked: Arc<RwLock<bool>>,
     encrypted_identity: Arc<RwLock<Option<crypto::IdentityFile>>>,
+    auto_unlock: bool,
     peers: Arc<RwLock<Vec<String>>>,
     known_records: Arc<RwLock<HashMap<String, records::BaseRecord>>>,
     p2p: Arc<RwLock<Option<Arc<p2p::P2PHandle>>>>,
@@ -210,19 +211,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Identity persistence (Phase 5) ---------------------------------
     let identity_path = crypto::identity_file_path(&data_path);
-    let (keypair_arc_opt, pub_key, locked, encrypted_identity) = if identity_path.exists() {
+    let (keypair_arc_opt, pub_key, locked, encrypted_identity, auto_unlock) = if identity_path.exists() {
         match crypto::read_identity_file(&identity_path) {
             Ok(file) => {
+                let au = file.auto_unlock;
                 if file.auto_unlock {
                     match crypto::load_identity_file(&file, "") {
-                        Ok(kp) => (Some(Arc::new(kp)), file.pubkey.clone(), false, None),
+                        Ok(kp) => (Some(Arc::new(kp)), file.pubkey.clone(), false, None, au),
                         Err(e) => {
                             warn!("auto-unlock failed ({}), starting locked", e);
-                            (None, file.pubkey.clone(), true, Some(file))
+                            (None, file.pubkey.clone(), true, Some(file), au)
                         }
                     }
                 } else {
-                    (None, file.pubkey.clone(), true, Some(file))
+                    (None, file.pubkey.clone(), true, Some(file), au)
                 }
             }
             Err(e) => {
@@ -232,7 +234,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 crypto::save_identity_to_disk(&identity_path, &kp, "", true)
                     .map_err(|e| format!("failed to save identity: {}", e))?;
                 info!("Generated and saved new identity: {}", pk);
-                (Some(Arc::new(kp)), pk, false, None)
+                (Some(Arc::new(kp)), pk, false, None, true)
             }
         }
     } else {
@@ -241,7 +243,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         crypto::save_identity_to_disk(&identity_path, &kp, "", true)
             .map_err(|e| format!("failed to save identity: {}", e))?;
         info!("Generated and saved new identity: {}", pk);
-        (Some(Arc::new(kp)), pk, false, None)
+        (Some(Arc::new(kp)), pk, false, None, true)
     };
 
     info!("Node public key (author): {}", pub_key);
@@ -272,6 +274,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pub_key,
         locked: Arc::new(RwLock::new(locked)),
         encrypted_identity: Arc::new(RwLock::new(encrypted_identity)),
+        auto_unlock,
         peers: Arc::new(RwLock::new(Vec::new())),
         known_records: Arc::new(RwLock::new(HashMap::new())),
         p2p: Arc::new(RwLock::new(None)),
@@ -382,6 +385,7 @@ async fn get_identity(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(json!({
         "pubkey": state.pub_key,
         "locked": locked,
+        "auto_unlock": state.auto_unlock,
     }))
 }
 
