@@ -10,6 +10,7 @@ import { KeyBackup } from './components/KeyBackup';
 import { IdentityManager } from './components/IdentityManager';
 import type { IdentityAction as ManagerAction } from './components/IdentityManager';
 import { Moderation } from './components/Moderation';
+import { Communities } from './components/Communities';
 import { FileTransfer } from './components/FileTransfer';
 import {
   fetchWall,
@@ -197,7 +198,15 @@ export default function App() {
   async function loadModerationStatus() {
     try {
       const mod = await fetchModerationList();
-      setHiddenCids([...mod.blocked_cids, ...mod.hidden_cids]);
+      const allHidden = new Set<string>([
+        ...mod.blocked_cids,
+        ...mod.hidden_cids,
+        ...Object.values(mod.communities ?? {}).flatMap((c) => [
+          ...c.blocked_cids,
+          ...c.hidden_cids,
+        ]),
+      ]);
+      setHiddenCids([...allHidden]);
     } catch (e) {
       console.error('Failed to fetch moderation status:', e);
     }
@@ -588,6 +597,9 @@ export default function App() {
         <a href="#" class={activeTab() === 'moderation' ? 'active' : ''} onclick={() => setActiveTab('moderation')}>
           Moderation
         </a>
+        <a href="#" class={activeTab() === 'communities' ? 'active' : ''} onclick={() => setActiveTab('communities')}>
+          Communities
+        </a>
         <a href="#" class={activeTab() === 'files' ? 'active' : ''} onclick={() => setActiveTab('files')}>
           Files
         </a>
@@ -675,6 +687,10 @@ export default function App() {
           <Moderation records={records()} />
         </Show>
 
+        <Show when={activeTab() === 'communities'}>
+          <Communities records={records()} currentPubKey={identity()?.pubkey ?? ''} />
+        </Show>
+
         <Show when={activeTab() === 'files'}>
           <FileTransfer
             records={records()}
@@ -686,7 +702,7 @@ export default function App() {
       </main>
 
       <footer class="app-footer">
-        <p>DDN Prototype B — Phase 4 (Reactions) + Phase 5 (Identity Persistence)</p>
+        <p>DDN Prototype B — Phase 4 (Reactions) + Phase 5 (Identity Persistence) + Phase 6.2 (Community Model)</p>
       </footer>
     </div>
   );

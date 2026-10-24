@@ -12,6 +12,9 @@ import type {
   IdentityFile,
   SealDmResponse,
   OpenDmResponse,
+  CommunityCreateRequest,
+  CommunityMembershipRequest,
+  ModerationResponse,
 } from '../types';
 
 function getStoredApiBase(): string {
@@ -359,10 +362,72 @@ export async function reportContent(target_cid: string, reason: string): Promise
   return resp.json();
 }
 
-export async function fetchModerationList(): Promise<{ blocked_cids: string[]; hidden_cids: string[]; mod_pubkeys: string[] }> {
+export async function fetchModerationList(): Promise<ModerationResponse> {
   const resp = await fetch(resolveUrl('/api/moderation'));
   if (!resp.ok) throw new Error('Failed to fetch moderation list');
   return resp.json();
+}
+
+export async function fetchCommunities(): Promise<BaseRecord[]> {
+  const resp = await fetch(resolveUrl('/api/community'));
+  if (!resp.ok) throw new Error('Failed to fetch communities');
+  const data: { communities: BaseRecord[] } = await resp.json();
+  return data.communities;
+}
+
+export async function createCommunity(
+  name: string,
+  description: string,
+): Promise<{ id: string; record: BaseRecord }> {
+  const resp = await fetch(resolveUrl('/api/community'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, description }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error || 'Failed to create community');
+  }
+  return resp.json();
+}
+
+export async function promoteCommunityModerator(
+  community_cid: string,
+  target_pubkey: string,
+  role: string,
+): Promise<{ id: string; record: BaseRecord }> {
+  const resp = await fetch(resolveUrl('/api/community/membership'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ community_cid, target_pubkey, role }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error || 'Failed to promote community moderator');
+  }
+  return resp.json();
+}
+
+export async function createCommunityModAction(
+  community_cid: string,
+  target_cid: string,
+  action: 'hide' | 'nuke',
+  mod_pubkey: string,
+): Promise<{ id: string }> {
+  const ts = Date.now();
+  const signed = await signRecord(
+    'mod_action',
+    mod_pubkey,
+    null,
+    ts,
+    {
+      target_cid,
+      action,
+      mod_pubkey,
+      community_cid,
+    },
+  );
+  return submitRecord(signed);
 }
 
 export interface MediaKeypair {

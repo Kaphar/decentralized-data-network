@@ -69,7 +69,7 @@ Every piece of data is a signed, hash-linked JSON record. The id is the SHA-256 
 ```json
 {
   "id":      "<sha256_cid_of_this_record>",
-  "type":    "profile | post | comment | reaction | message | media_offer | media_accept | report | mod_action | mod_grant",
+   "type":    "profile | post | comment | reaction | message | media_offer | media_accept | report | mod_action | mod_grant | community | community_membership",
   "author":  "<ed25519_pubkey_multihash>",
   "prev":    "<cid_of_authors_previous_record_or_null>",
   "ts":      1728900000,
@@ -91,6 +91,8 @@ Every piece of data is a signed, hash-linked JSON record. The id is the SHA-256 
 | report | `{ "target_cid": "<cid_of_content>", "reason": "explicit_content" }` |
 | mod_action | `{ "target_cid": "<cid_or_ip_or_cidr>", "action": "hide" | "nuke" | "ip_ban", "mod_pubkey": "<pubkey>", "duration_secs": <optional, for ip_ban> }` |
 | mod_grant | `{ "new_mod_pubkey": "<pubkey>", "signed_by": "<admin_pubkey>" }` |
+| community | `{ "name": "Tech Talk", "description": "...", "creator": "<creator_pubkey>" }` (author = founder-moderator, record id = community_cid) |
+| community_membership | `{ "community_cid": "<cid>", "target_pubkey": "<pubkey>", "role": "moderator" }` (signed by founder or existing community mod) |
 ## 5. Key Management & Security Flow
 
 The "No Admin Reset" Rule: To maintain true E2EE, the server/admin must never possess the user's private key.
@@ -231,5 +233,15 @@ Since we cannot cryptographically force a node to delete data it already has, mo
 | 3 | Moderation System: `report`, `mod_grant`, `mod_action` record types. `POST /api/report` endpoint. `GET /api/moderation` endpoint with blocked/hidden CIDs and mod pubkeys. Client-side report UI + moderation panel. Per-post report buttons. Node-level blocked CID enforcement (refuse `GET /api/blob/:cid`, `GET /api/record/:id`, refuse `POST /api/blob`, `POST /api/record` for nuked content). Client-side hide filtering (blur posts with `action: "hide"`). **IP Ban**: `mod_action` with `action: "ip_ban"` + `duration_secs` → in-memory CIDR IP bans, HTTP 429 for banned clients. | **Done** | ~2 weeks |
 | 4 | Reactions: `reaction` record type. Emoji buttons on posts/comments in `PostList` + `Chat`. Client-side aggregation of reactions by `target_cid` + `emoji`. Toggle/remove own reactions. | **Done** | ~1 week |
 | 5 | Identity Persistence & Management: Save `ddn_identity.json` to `DDN_DATA_DIR` on first run. Load on subsequent startups. `POST /api/identity/unlock`, `POST /api/identity/import`, `DELETE /api/identity` endpoints. New `IdentityManager` frontend component with dropdown action selector for switch/add/remove/import. **Broadcast Mode**: "Don't use WebRTC" checkbox in `PostForm` — overrides 5 MB threshold, forces all uploads through CAS blob path. | **Done** | ~2 weeks |
-| 6.1 | **Desktop Distribution (Tauri)**: Package the Rust node as a background sidecar binary. System tray icon with green/red status indicator, peer count, data transfer stats. Tray menu: toggle node on/off, open main window, settings (ports, data dir, bootstrap peers). | **Planned** | ~3 weeks |
-| 6.2 | **Community Model**: `community` record type for creation. Community-scoped `mod_action` with `community_cid`. `community_membership` record for promoting moderators per-community. Founder-moderator auto-elected on creation. | **Planned** | ~2 weeks |
+
+| 6.2 | **Community Model (Phase A — Minimal)**: `community` record type for creation with `creator` auto-elected as founder-moderator. `community_membership` record type `{ "community_cid", "target_pubkey", "role" }` for promoting moderators per-community. Community-scoped `mod_action` with optional `community_cid` — validated against community moderator sets. `GET /api/communities`, `POST /api/community`, `POST /api/community/membership` endpoints. Client-side merge of global + community-scoped hidden/blocked CIDs. **Done** | ~1 week |
+
+| 6.2b | **Community Model (Phase B — Future)**: Per-community gossipsub topics (`ddn/community/<cid>/v1`) for record isolation and privacy. Community-scoped post filtering (posts carry optional `community_cid`). Full namespace scoping for mod_actions. Community-scoped role hierarchy (admin/moderator/member). Private/invite-only communities with per-community ACLs. | **Planned** | ~2-3 weeks |
+
+
+PROTOTYPE C :
+ **Desktop Distribution (Tauri)**: Package the Rust node as a background sidecar binary. System tray icon with green/red status indicator, peer count, data transfer stats. Tray menu: toggle node on/off, open main window, settings (ports, data dir, bootstrap peers). | **Planned** | ~3 weeks |
+ 
+ * study possibility of Blockchain like lbry. plan some way to access data from a simple data blockchain and some integration within our decentralized webpages.
+ 
+ * select a smart way of handling multiple "dapps" (a diferent webpage). our Wall with post could be a first example, we can set up some other classical simple exemples 

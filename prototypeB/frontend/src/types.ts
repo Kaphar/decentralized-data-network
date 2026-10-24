@@ -16,8 +16,10 @@ export type RecordPayload =
   | { target_user: string; file_name: string; size_bytes: number; ephemeral_pubkey: string }
   | { offer_cid: string; ephemeral_pubkey: string }
   | { target_cid: string; reason: string }
-  | { target_cid: string; action: string; mod_pubkey: string }
+  | { target_cid: string; action: string; mod_pubkey: string; community_cid?: string; duration_secs?: number }
   | { new_mod_pubkey: string; signed_by: string }
+  | { name: string; description: string; creator: string }
+  | { community_cid: string; target_pubkey: string; role: string }
   | Record<string, unknown>;
 
 export interface MediaRef {
@@ -179,4 +181,31 @@ export interface ModActionRequest {
   target_cid: string;
   action: 'hide' | 'nuke';
   mod_pubkey: string;
+}
+
+export interface CommunityCreateRequest {
+  name: string;
+  description: string;
+}
+
+export interface CommunityMembershipRequest {
+  community_cid: string;
+  target_pubkey: string;
+  role: string;
+}
+
+export interface CommunityInfoResponse {
+  cid: string;
+  name: string;
+  founder: string;
+  moderators: string[];
+  blocked_cids: string[];
+  hidden_cids: string[];
+}
+
+export interface ModerationResponse {
+  blocked_cids: string[];
+  hidden_cids: string[];
+  mod_pubkeys: string[];
+  communities: Record<string, CommunityInfoResponse>;
 }

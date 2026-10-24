@@ -15,6 +15,8 @@ pub enum RecordType {
     Report,
     ModAction,
     ModGrant,
+    Community,
+    CommunityMembership,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

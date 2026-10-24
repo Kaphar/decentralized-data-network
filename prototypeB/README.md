@@ -9,6 +9,9 @@ Phase 0 of the Decentralized Data Network: a standalone, local-first decentraliz
 
 ## Quick Start
 
+node scripts/test_e2e.js
+node scripts/test_e2e.js --keep-running
+
 ```bash
 # Build and run the Rust node (serves API + static frontend)
 cd prototypeB/node
@@ -129,3 +132,6 @@ npm run typecheck  # type-check without emitting
 ## Architecture
 
 See `PLAN.md` at the repository root for full architecture documentation.
+
+
+

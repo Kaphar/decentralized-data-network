@@ -48,17 +48,20 @@ fn emit(state: &AppState, event: serde_json::Value) {
 }
 
 /// Check whether a CID is in the node's blocked set (nuke actions by trusted mods).
+/// Only global (non-community-scoped) nukes are enforced at the node level.
 async fn is_cid_blocked(state: &AppState, cid: &str) -> bool {
     let known = state.known_records.read().await;
-    let (blocked, _, _) = compute_moderation_sets(&known, &state.pub_key);
-    blocked.contains(cid)
+    let sets = compute_moderation_sets(&known, &state.pub_key);
+    sets.blocked_cids.contains(cid)
 }
 
 /// Check whether a CID is hidden by moderation (hide actions by trusted mods).
+/// Only global (non-community-scoped) hides are checked here; community-scoped
+/// hides are returned to clients via GET /api/moderation for client-side filtering.
 async fn is_cid_hidden(state: &AppState, cid: &str) -> bool {
     let known = state.known_records.read().await;
-    let (_, hidden, _) = compute_moderation_sets(&known, &state.pub_key);
-    hidden.contains(cid)
+    let sets = compute_moderation_sets(&known, &state.pub_key);
+    sets.hidden_cids.contains(cid)
 }
 
 /// Start the libp2p swarm and spawn the gossip + signal consumer tasks.
@@ -331,6 +334,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/webrtc/signal", post(webrtc_signal))
         .route("/api/report", post(create_report_endpoint))
         .route("/api/moderation", get(moderation_status))
+        .route("/api/community", post(create_community_endpoint).get(list_communities))
+        .route("/api/community/membership", post(promote_community_moderator_endpoint))
         .route("/api/peers", post(add_peer).get(list_peers))
         .route("/api/sync", post(sync))
         .route("/api/identity", get(get_identity).delete(delete_identity))
@@ -1310,28 +1315,63 @@ async fn create_report_endpoint(
 }
 
 /// GET /api/moderation — return the list of blocked CIDs and trusted mod
-/// pubkeys that the node is enforcing. Blocked CIDs come from verified
-/// `mod_action` records with `action: "nuke"`; hidden CIDs come from
-/// `action: "hide"`; mod pubkeys come from `mod_grant` records signed by the
-/// admin.
+/// pubkeys that the node is enforcing, plus community-scoped moderation data.
+/// Blocked CIDs come from verified `mod_action` records with `action: "nuke"`;
+/// hidden CIDs come from `action: "hide"`; mod pubkeys come from `mod_grant`
+/// records signed by the admin.
+#[derive(Serialize, Deserialize)]
+struct CommunityInfoResponse {
+    cid: String,
+    name: String,
+    founder: String,
+    moderators: Vec<String>,
+    blocked_cids: Vec<String>,
+    hidden_cids: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct ModerationResponse {
     blocked_cids: Vec<String>,
     hidden_cids: Vec<String>,
     mod_pubkeys: Vec<String>,
+    communities: HashMap<String, CommunityInfoResponse>,
+}
+
+/// All moderation data computed from known records.
+struct ModerationSets {
+    /// Global CIDs nuked by trusted (admin-granted) mods.
+    blocked_cids: HashSet<String>,
+    /// Global CIDs hidden by trusted (admin-granted) mods.
+    hidden_cids: HashSet<String>,
+    /// Global mod pubkeys (from mod_grant signed by admin).
+    mod_pubkeys: HashSet<String>,
+    /// Community-scoped info, keyed by community CID (the `community` record id).
+    communities: HashMap<String, CommunityInfo>,
+}
+
+/// Computed moderation context for a single community.
+#[derive(Default)]
+struct CommunityInfo {
+    cid: String,
+    name: String,
+    founder: String,
+    moderators: HashSet<String>,
+    blocked_cids: HashSet<String>,
+    hidden_cids: HashSet<String>,
 }
 
 /// Compute moderation sets from known records.
-/// Returns (blocked_cids, hidden_cids, mod_pubkeys).
+/// Returns global and community-scoped moderation data.
 fn compute_moderation_sets(
     known: &HashMap<String, records::BaseRecord>,
     admin_key: &str,
-) -> (HashSet<String>, HashSet<String>, HashSet<String>) {
+) -> ModerationSets {
     let mut blocked_cids: HashSet<String> = HashSet::new();
     let mut hidden_cids: HashSet<String> = HashSet::new();
     let mut mod_pubkeys: HashSet<String> = HashSet::new();
+    let mut communities: HashMap<String, CommunityInfo> = HashMap::new();
 
-    // First pass: collect mod pubkeys from mod_grant records.
+    // --- First pass: collect global mod pubkeys from mod_grant records ---
     for record in known.values() {
         if !matches!(record.r#type, records::RecordType::ModGrant) {
             continue;
@@ -1351,10 +1391,90 @@ fn compute_moderation_sets(
         }
     }
 
-    // Second pass: collect blocked and hidden CIDs from mod_action records
-    // signed by trusted mods.
+    // --- Second pass: discover communities (founder auto-elected) ---
+    for record in known.values() {
+        if !matches!(record.r#type, records::RecordType::Community) {
+            continue;
+        }
+        if record.verify().is_err() {
+            continue;
+        }
+        if let Some(payload) = record.payload.as_object() {
+            let name = payload
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let founder = payload
+                .get("creator")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&record.author)
+                .to_string();
+            // The community CID is the record's own id.
+            let cid = record.id.clone();
+            communities.insert(
+                cid.clone(),
+                CommunityInfo {
+                    cid: cid.clone(),
+                    name,
+                    founder: founder.clone(),
+                    moderators: std::iter::once(founder).collect(),
+                    ..Default::default()
+                },
+            );
+        } else {
+            let cid = record.id.clone();
+            communities.insert(
+                cid.clone(),
+                CommunityInfo {
+                    cid: cid.clone(),
+                    founder: record.author.clone(),
+                    moderators: std::iter::once(record.author.clone()).collect(),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
+    // --- Third pass: collect community moderators from community_membership records ---
+    // Each membership record is signed by a founder or existing community moderator,
+    // promoting target_pubkey to the "moderator" role for that community.
+    for record in known.values() {
+        if !matches!(record.r#type, records::RecordType::CommunityMembership) {
+            continue;
+        }
+        if record.verify().is_err() {
+            continue;
+        }
+        if let Some(payload) = record.payload.as_object() {
+            let community_cid = payload
+                .get("community_cid")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let target = payload
+                .get("target_pubkey")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let role = payload
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            if let Some(info) = communities.get_mut(community_cid) {
+                // Only honor "moderator" role promotions.
+                if role == "moderator" && !target.is_empty() {
+                    info.moderators.insert(target.to_string());
+                }
+            }
+        }
+    }
+
+    // --- Fourth pass: collect blocked, hidden, and community-scoped actions ---
     for record in known.values() {
         if !matches!(record.r#type, records::RecordType::ModAction) {
+            continue;
+        }
+        if record.verify().is_err() {
             continue;
         }
         if let Some(payload) = record.payload.as_object() {
@@ -1367,7 +1487,24 @@ fn compute_moderation_sets(
                 .get("target_cid")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if mod_pubkeys.contains(mod_pk) && !target.is_empty() {
+            let community_cid = payload
+                .get("community_cid")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+
+            if let Some(cid) = community_cid {
+                // Community-scoped action: validate against community moderators.
+                if let Some(info) = communities.get_mut(cid) {
+                    if info.moderators.contains(mod_pk) && !target.is_empty() {
+                        if action == "nuke" {
+                            info.blocked_cids.insert(target.to_string());
+                        } else if action == "hide" {
+                            info.hidden_cids.insert(target.to_string());
+                        }
+                    }
+                }
+            } else if mod_pubkeys.contains(mod_pk) && !target.is_empty() {
+                // Global action.
                 if action == "nuke" {
                     blocked_cids.insert(target.to_string());
                 } else if action == "hide" {
@@ -1377,17 +1514,208 @@ fn compute_moderation_sets(
         }
     }
 
-    (blocked_cids, hidden_cids, mod_pubkeys)
+    ModerationSets {
+        blocked_cids,
+        hidden_cids,
+        mod_pubkeys,
+        communities,
+    }
 }
 
 async fn moderation_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let known = state.known_records.read().await;
-    let (blocked, hidden, mods) = compute_moderation_sets(&known, &state.pub_key);
+    let sets = compute_moderation_sets(&known, &state.pub_key);
+    let communities: HashMap<String, CommunityInfoResponse> = sets
+        .communities
+        .into_iter()
+        .map(|(cid, info)| {
+            let resp = CommunityInfoResponse {
+                cid: info.cid,
+                name: info.name,
+                founder: info.founder,
+                moderators: info.moderators.into_iter().collect(),
+                blocked_cids: info.blocked_cids.into_iter().collect(),
+                hidden_cids: info.hidden_cids.into_iter().collect(),
+            };
+            (cid, resp)
+        })
+        .collect();
     Json(ModerationResponse {
-        blocked_cids: blocked.into_iter().collect(),
-        hidden_cids: hidden.into_iter().collect(),
-        mod_pubkeys: mods.into_iter().collect(),
+        blocked_cids: sets.blocked_cids.into_iter().collect(),
+        hidden_cids: sets.hidden_cids.into_iter().collect(),
+        mod_pubkeys: sets.mod_pubkeys.into_iter().collect(),
+        communities,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6.2: Community Model
+// ---------------------------------------------------------------------------
+
+/// POST /api/community — create a community. The author (signing identity)
+/// automatically becomes the founder-moderator. The record id becomes the
+/// community_cid, used by community-scoped mod_action and community_membership
+/// records.
+#[derive(Deserialize)]
+struct CommunityCreateRequest {
+    name: String,
+    description: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CommunityResponse {
+    id: String,
+    record: records::BaseRecord,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CommunityListResponse {
+    communities: Vec<records::BaseRecord>,
+}
+
+async fn create_community_endpoint(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let req: CommunityCreateRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid request: {}", e) })),
+            )
+                .into_response()
+        }
+    };
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let sign_req = records::SignRequest {
+        r#type: "community".to_string(),
+        author: state.pub_key.clone(),
+        prev: None,
+        ts,
+        payload: json!({
+            "name": req.name,
+            "description": req.description,
+            "creator": state.pub_key.clone(),
+        }),
+    };
+
+    let kp = match get_keypair_or_locked(&state).await {
+        Ok(k) => k,
+        Err(e) => return e.into_response(),
+    };
+
+    let record = records::BaseRecord::from_sign_request(&sign_req, &kp);
+    let id = record.id.clone();
+    let canonical = record.to_canonical_json().unwrap_or_default();
+    state.store.put_record(&id, canonical.as_bytes()).ok();
+
+    let mut known = state.known_records.write().await;
+    known.insert(id.clone(), record.clone());
+    drop(known);
+
+    if let Some(p2p) = state.p2p.read().await.as_ref() {
+        p2p.publish_record(canonical.as_bytes().to_vec());
+    }
+    emit(&state, json!({ "type": "record", "record": &record }));
+
+    (
+        StatusCode::CREATED,
+        Json(CommunityResponse { id, record }),
+    )
+        .into_response()
+}
+
+/// GET /api/community — list all known community records.
+async fn list_communities(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let known = state.known_records.read().await;
+    let communities: Vec<records::BaseRecord> = known
+        .values()
+        .filter(|r| matches!(r.r#type, records::RecordType::Community))
+        .cloned()
+        .collect();
+    Json(CommunityListResponse { communities })
+}
+
+/// POST /api/community/membership — promote a user to moderator for a community.
+/// The signing identity must be the founder or an existing community moderator.
+/// Validation is performed client-side; the node stores and gossips the record.
+/// The `compute_moderation_sets` function validates that the signer is a known
+/// community moderator before honoring the membership in moderation computations.
+#[derive(Deserialize)]
+struct CommunityMembershipRequest {
+    community_cid: String,
+    target_pubkey: String,
+    role: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CommunityMembershipResponse {
+    id: String,
+    record: records::BaseRecord,
+}
+
+async fn promote_community_moderator_endpoint(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let req: CommunityMembershipRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid request: {}", e) })),
+            )
+                .into_response()
+        }
+    };
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let sign_req = records::SignRequest {
+        r#type: "community_membership".to_string(),
+        author: state.pub_key.clone(),
+        prev: None,
+        ts,
+        payload: json!({
+            "community_cid": req.community_cid,
+            "target_pubkey": req.target_pubkey,
+            "role": req.role,
+        }),
+    };
+
+    let kp = match get_keypair_or_locked(&state).await {
+        Ok(k) => k,
+        Err(e) => return e.into_response(),
+    };
+
+    let record = records::BaseRecord::from_sign_request(&sign_req, &kp);
+    let id = record.id.clone();
+    let canonical = record.to_canonical_json().unwrap_or_default();
+    state.store.put_record(&id, canonical.as_bytes()).ok();
+
+    let mut known = state.known_records.write().await;
+    known.insert(id.clone(), record.clone());
+    drop(known);
+
+    if let Some(p2p) = state.p2p.read().await.as_ref() {
+        p2p.publish_record(canonical.as_bytes().to_vec());
+    }
+    emit(&state, json!({ "type": "record", "record": &record }));
+
+    (
+        StatusCode::CREATED,
+        Json(CommunityMembershipResponse { id, record }),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
