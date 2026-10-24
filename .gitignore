@@ -1,3 +1,11 @@
 __pycache__/
 *.pyc
 data/*
+prototypeA/data/*
+prototypeB/data/*
+node_modules
+prototypeB/frontend/dist/*
+prototypeB/node/target/*
+prototypeB/node/data/*
+prototypeB/node/data1/*
+prototypeB/node/data2/*
