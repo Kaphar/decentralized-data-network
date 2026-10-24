@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "format": "ddn-keybackup-v1",
+  "pubkey": "7c50d65694b2c2f7b664420974e3cdce391db14d56eb9f59a6f97e775b6e5a4b",
+  "created_ms": 1792811279739,
+  "encrypted": {
+    "encrypted_secret": "hIOSXWc+4RlO3HGt+1qCnAR07sq0f/aytCPaWHGdwdPD/tM9knkXhKbTulWRidWUUroleaLzL33yvtWC",
+    "salt": "yc+T0X0Vom6rSVUzdwDRSg==",
+    "cipher": "aes-256-gcm",
+    "kdf": {
+      "alg": "pbkdf2-sha256",
+      "iterations": 600000
+    }
+  },
+  "auto_unlock": true
+}

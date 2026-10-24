@@ -1,0 +1,35 @@
+{
+  "build": {
+    "frontendDist": "../frontend/dist",
+    "devUrl": "http://localhost:3000"
+  },
+  "productName": "DDN",
+  "version": "0.1.0",
+  "identifier": "com.ddn.app",
+  "app": {
+    "windows": [
+      {
+         "url": "http://127.0.0.1:3000/",
+        "label": "main",
+        "width": 1024,
+        "height": 768,
+        "visible": false,
+        "title": "DDN",
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
+    ],
+    "targets": ["msi", "nsis"],
+    "externalBin": ["ddn-node"]
+  }
+}
