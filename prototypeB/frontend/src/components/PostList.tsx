@@ -117,12 +117,18 @@ export interface PostListProps {
   onReaction?: (targetCid: string, emoji: string) => void;
   receivers?: Map<string, WebRTCReceiver>;
   onReceiveOffer?: (offer: MediaOfferInfo) => void;
+  dapp?: string | null;
 }
 
 export const PostList: Component<PostListProps> = (props) => {
   const sortedPosts = createMemo(() =>
     props.records
       .filter((r) => r.type === 'post')
+      .filter((r) => {
+        if (!props.dapp) return true;
+        const p = r.payload as Record<string, unknown>;
+        return p?.dapp === props.dapp;
+      })
       .sort((a, b) => b.ts - a.ts)
   );
 

@@ -37,7 +37,7 @@ export function getApiBase(): string {
   return apiBase;
 }
 
-function resolveUrl(path: string): string {
+export function resolveUrl(path: string): string {
   const base = getApiBase();
   return base ? `${base}${path}` : path;
 }

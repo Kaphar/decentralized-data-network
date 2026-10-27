@@ -107,6 +107,7 @@ fn start_node(
     cmd.env("DDN_HTTP_PORT", cfg.http_port.to_string())
         .env("DDN_P2P_PORT", cfg.p2p_port.to_string())
         .env("DDN_DATA_DIR", &cfg.data_dir)
+        .env("DDN_ENABLE_CHAIN", "1")
         .env(
             "DDN_FRONTEND_PATH",
             resolve_frontend_path(app),
@@ -200,12 +201,16 @@ fn main() {
                 )?)
                 .build()?;
 
-            let tray = TrayIconBuilder::new()
-                .tooltip("Decentralized Data Network")
-                .icon(tauri::image::Image::from_path("icons/16x16.png")?)
-                .menu(&tray_menu)
-                .show_menu_on_left_click(true)
-                .build(app.handle())?;
+            let icon_path = app
+        .path()
+        .resolve("icons/16x16.png", tauri::path::BaseDirectory::Resource)
+        .unwrap_or_else(|_| PathBuf::from("icons/16x16.png"));
+    let tray = TrayIconBuilder::new()
+        .tooltip("Decentralized Data Network")
+        .icon(tauri::image::Image::from_path(icon_path)?)
+        .menu(&tray_menu)
+        .show_menu_on_left_click(true)
+        .build(app.handle())?;
 
             let _ = tray;
 

@@ -1,4 +1,4 @@
-import { createSignal, createEffect, onCleanup, Show } from 'solid-js';
+﻿import { createSignal, createEffect, onCleanup, Show } from 'solid-js';
 import { PostList } from './components/PostList';
 import { PostForm } from './components/PostForm';
 import { Chat } from './components/Chat';
@@ -213,15 +213,24 @@ export default function App() {
   }
 
   async function handlePostSubmit(text: string, mediaCids: MediaRef[]) {
-    if (!identity()) return;
+    const result = await handleSignAndSubmit(text, mediaCids);
+    if (result !== null) {
+      await loadWall();
+    }
+    return result;
+  }
+
+  async function handleSignAndSubmit(text: string, mediaCids: MediaRef[]): Promise<BaseRecord | null> {
+    if (!identity()) return null;
     const ts = Date.now();
     const payload = JSON.stringify({ text, media: mediaCids });
     try {
       const signed = await signRecord('post', identity()!.pubkey, null, ts, JSON.parse(payload));
       await submitRecord(signed);
-      await loadWall();
+      return signed;
     } catch (e) {
       setError(String(e));
+      return null;
     }
   }
 
@@ -600,10 +609,10 @@ export default function App() {
         <a href="#" class={activeTab() === 'communities' ? 'active' : ''} onclick={() => setActiveTab('communities')}>
           Communities
         </a>
-        <a href="#" class={activeTab() === 'files' ? 'active' : ''} onclick={() => setActiveTab('files')}>
+         <a href="#" class={activeTab() === 'files' ? 'active' : ''} onclick={() => setActiveTab('files')}>
           Files
-        </a>
-      </nav>
+         </a>
+       </nav>
 
       <main class="main-content">
         <Show when={activeTab() === 'network'}>
@@ -611,7 +620,7 @@ export default function App() {
         </Show>
 
         <Show when={activeTab() === 'wall'}>
-          <aside class="sidebar">
+          <div class="wall-column">
             <PostForm
               onSubmit={handlePostSubmit}
               onBlobUpload={handleBlobUpload}
@@ -621,8 +630,6 @@ export default function App() {
               onUseWebRTCChange={setUseWebRTC}
             />
             <PeerManager onSync={handleSync} />
-          </aside>
-          <section class="feed">
             <Show when={initialLoad()} fallback={
               <>
                 <Show when={refreshing()}>
@@ -640,7 +647,7 @@ export default function App() {
             }>
               <div class="loading">Loading...</div>
             </Show>
-          </section>
+          </div>
         </Show>
 
         <Show when={activeTab() === 'chat'}>
@@ -702,7 +709,7 @@ export default function App() {
       </main>
 
       <footer class="app-footer">
-        <p>DDN Prototype B — Phase 4 (Reactions) + Phase 5 (Identity Persistence) + Phase 6.2 (Community Model)</p>
+        <p>DDN Prototype B â€” Phase 4 (Reactions) + Phase 5 (Identity Persistence) + Phase 6.2 (Community Model)</p>
       </footer>
     </div>
   );

@@ -1,0 +1,1 @@
+frontend path: D:\workspace\decentralized-data-network\prototypeB\node\../frontend\dist
