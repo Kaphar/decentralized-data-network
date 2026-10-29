@@ -511,9 +511,15 @@ records by this field. Existing record types are reused — no new on-chain sche
   built by `npm run build:dapps` → `dist/dapps/chaindemo/`.
 - Added generic `/dapp/:name` route (308 → `/dapps/<name>/index.html`) + `DDN_DAPPS_DIR`
   for runtime dApp distribution without a node rebuild or frontend rebuild.
-- Chain tab: added media upload (images, videos, audio) with preview. Users can anchor
-  messages with optional media to the blockchain.
-- **Open question**: Should dApps be embedded as WebViews inside Tauri or accessed via browser?
+  - Chain tab: added media upload (images, videos, audio) with preview. Users can anchor
+    messages with optional media to the blockchain.
+- Notes dApp implemented: private, client-side encrypted notes served at `/dapp/notes`
+  using X25519 + AES-GCM encryption (reuses `/api/dm/seal` + `/api/dm/open`). Notes
+  are stored as `post`-type records with `payload.dapp = "notes"`.
+- **Open question resolved**: Option 1 chosen — dApps are served by the node at
+  `/dapp/<name>` and accessed via browser or external WebView. No embedded Tauri
+  WebViews for dApps. Users can open dApps in any browser by navigating to the node's
+  URL.
 
 ### Note: Frontend/Backend Symlink Coupling
 
