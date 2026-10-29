@@ -7,8 +7,8 @@ body {
 }
 
 .app-container {
-  max-width: 960px;
-  margin: 0 auto;
+  max-width: 100vw;
+  margin: 0;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -648,7 +648,7 @@ body {
 
 .moderation-view {
   padding: 1rem;
-  max-width: 960px;
+  max-width: 100vw;
   margin: 0 auto;
 }
 
@@ -846,4 +846,67 @@ body {
 
 .settings-view .tabs {
   margin-bottom: 1rem;
+}
+
+.notes-app {
+  padding: 1rem;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.notes-app h3 {
+  margin-top: 0;
+  color: #fff;
+}
+
+.note-card {
+  background: #0f0f17;
+  border: 1px solid #2a2a3a;
+  border-radius: 8px;
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.note-timestamp {
+  font-size: 0.75rem;
+  color: #888;
+  margin-bottom: 0.25rem;
+}
+
+.note-text {
+  font-size: 0.95rem;
+  line-height: 1.5;
+  word-break: break-word;
+  margin-bottom: 0.25rem;
+}
+
+.note-meta {
+  font-size: 0.7rem;
+  color: #666;
+}
+
+.text-muted {
+  color: #888;
+}
+
+.monospace {
+  font-family: 'Monaco', 'Consolas', monospace;
+  font-size: 0.8rem;
+}
+
+.btn {
+  display: inline-block;
+  padding: 0.4rem 0.8rem;
+  background: #00d4ff;
+  color: #0a0a12;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }

@@ -143,9 +143,7 @@ impl AnchorChain {
 
     fn save(&self) {
         let path = self.data_dir.join("chain_state.json");
-        let blocks = futures::executor::block_on(async {
-            self.blocks.read().await.clone()
-        });
+        let blocks = futures::executor::block_on(async { self.blocks.read().await.clone() });
         if let Ok(s) = serde_json::to_string_pretty(&blocks) {
             let _ = std::fs::create_dir_all(&self.data_dir);
             let _ = std::fs::write(&path, s);

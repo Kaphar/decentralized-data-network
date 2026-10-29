@@ -6,6 +6,7 @@ mod p2p;
 mod records;
 mod storage;
 
+use axum::response::Redirect;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -26,7 +27,6 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
-use axum::response::Redirect;
 use tracing::{info, warn};
 
 struct AppState {
@@ -218,40 +218,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Identity persistence (Phase 5) ---------------------------------
     let identity_path = crypto::identity_file_path(&data_path);
-    let (keypair_arc_opt, pub_key, locked, encrypted_identity, auto_unlock) = if identity_path.exists() {
-        match crypto::read_identity_file(&identity_path) {
-            Ok(file) => {
-                let au = file.auto_unlock;
-                if file.auto_unlock {
-                    match crypto::load_identity_file(&file, "") {
-                        Ok(kp) => (Some(Arc::new(kp)), file.pubkey.clone(), false, None, au),
-                        Err(e) => {
-                            warn!("auto-unlock failed ({}), starting locked", e);
-                            (None, file.pubkey.clone(), true, Some(file), au)
+    let (keypair_arc_opt, pub_key, locked, encrypted_identity, auto_unlock) =
+        if identity_path.exists() {
+            match crypto::read_identity_file(&identity_path) {
+                Ok(file) => {
+                    let au = file.auto_unlock;
+                    if file.auto_unlock {
+                        match crypto::load_identity_file(&file, "") {
+                            Ok(kp) => (Some(Arc::new(kp)), file.pubkey.clone(), false, None, au),
+                            Err(e) => {
+                                warn!("auto-unlock failed ({}), starting locked", e);
+                                (None, file.pubkey.clone(), true, Some(file), au)
+                            }
                         }
+                    } else {
+                        (None, file.pubkey.clone(), true, Some(file), au)
                     }
-                } else {
-                    (None, file.pubkey.clone(), true, Some(file), au)
+                }
+                Err(e) => {
+                    warn!("identity file unreadable ({}), generating new identity", e);
+                    let kp = crypto::Keypair::generate();
+                    let pk = crypto::pubkey_to_cid(&kp.public_key_bytes());
+                    crypto::save_identity_to_disk(&identity_path, &kp, "", true)
+                        .map_err(|e| format!("failed to save identity: {}", e))?;
+                    info!("Generated and saved new identity: {}", pk);
+                    (Some(Arc::new(kp)), pk, false, None, true)
                 }
             }
-            Err(e) => {
-                warn!("identity file unreadable ({}), generating new identity", e);
-                let kp = crypto::Keypair::generate();
-                let pk = crypto::pubkey_to_cid(&kp.public_key_bytes());
-                crypto::save_identity_to_disk(&identity_path, &kp, "", true)
-                    .map_err(|e| format!("failed to save identity: {}", e))?;
-                info!("Generated and saved new identity: {}", pk);
-                (Some(Arc::new(kp)), pk, false, None, true)
-            }
-        }
-    } else {
-        let kp = crypto::Keypair::generate();
-        let pk = crypto::pubkey_to_cid(&kp.public_key_bytes());
-        crypto::save_identity_to_disk(&identity_path, &kp, "", true)
-            .map_err(|e| format!("failed to save identity: {}", e))?;
-        info!("Generated and saved new identity: {}", pk);
-        (Some(Arc::new(kp)), pk, false, None, true)
-    };
+        } else {
+            let kp = crypto::Keypair::generate();
+            let pk = crypto::pubkey_to_cid(&kp.public_key_bytes());
+            crypto::save_identity_to_disk(&identity_path, &kp, "", true)
+                .map_err(|e| format!("failed to save identity: {}", e))?;
+            info!("Generated and saved new identity: {}", pk);
+            (Some(Arc::new(kp)), pk, false, None, true)
+        };
 
     info!("Node public key (author): {}", pub_key);
     info!("Data directory: {}", data_dir);
@@ -355,8 +356,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/webrtc/signal", post(webrtc_signal))
         .route("/api/report", post(create_report_endpoint))
         .route("/api/moderation", get(moderation_status))
-        .route("/api/community", post(create_community_endpoint).get(list_communities))
-        .route("/api/community/membership", post(promote_community_moderator_endpoint))
+        .route(
+            "/api/community",
+            post(create_community_endpoint).get(list_communities),
+        )
+        .route(
+            "/api/community/membership",
+            post(promote_community_moderator_endpoint),
+        )
         .route("/api/peers", post(add_peer).get(list_peers))
         .route("/api/sync", post(sync))
         .route("/api/identity", get(get_identity).delete(delete_identity))
@@ -377,7 +384,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ws/events", get(ws_events))
         .route("/", get(serve_frontend))
         .nest_service("/static", ServeDir::new(&frontend_path))
-        .nest_service("/assets", ServeDir::new(format!("{}/assets", frontend_path)))
+        .nest_service(
+            "/assets",
+            ServeDir::new(format!("{}/assets", frontend_path)),
+        )
         .nest_service("/dapps", ServeDir::new(format!("{}/dapps", frontend_path)))
         .with_state(state)
         .layer(cors);
@@ -1627,10 +1637,7 @@ fn compute_moderation_sets(
                 .get("target_pubkey")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let role = payload
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
 
             if let Some(info) = communities.get_mut(community_cid) {
                 // Only honor "moderator" role promotions.
@@ -1796,11 +1803,7 @@ async fn create_community_endpoint(
     }
     emit(&state, json!({ "type": "record", "record": &record }));
 
-    (
-        StatusCode::CREATED,
-        Json(CommunityResponse { id, record }),
-    )
-        .into_response()
+    (StatusCode::CREATED, Json(CommunityResponse { id, record })).into_response()
 }
 
 /// GET /api/community — list all known community records.
@@ -1991,7 +1994,10 @@ async fn chain_anchor(
         }
     };
 
-    if chain.anchor_cid(&req.author, &req.record_cid, req.ts, &req.sig).await {
+    if chain
+        .anchor_cid(&req.author, &req.record_cid, req.ts, &req.sig)
+        .await
+    {
         (StatusCode::ACCEPTED, Json(json!({ "status": "anchoring" })))
     } else {
         (
@@ -2024,9 +2030,7 @@ async fn chain_block(
     }
 }
 
-async fn chain_latest_block(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn chain_latest_block(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let chain = match &state.chain {
         Some(c) => c,
         None => {
@@ -2056,7 +2060,10 @@ async fn chain_record_status(
     };
 
     match chain.anchor_status(&cid).await {
-        Some(height) => (StatusCode::OK, Json(json!({ "cid": cid, "height": height }))),
+        Some(height) => (
+            StatusCode::OK,
+            Json(json!({ "cid": cid, "height": height })),
+        ),
         None => (
             StatusCode::NOT_FOUND,
             Json(json!({ "cid": cid, "height": null })),
@@ -2064,9 +2071,7 @@ async fn chain_record_status(
     }
 }
 
-async fn chain_validators(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn chain_validators(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let chain = match &state.chain {
         Some(c) => c,
         None => {
@@ -2077,7 +2082,10 @@ async fn chain_validators(
         }
     };
 
-    (StatusCode::OK, Json(json!({ "validators": chain.validators() })))
+    (
+        StatusCode::OK,
+        Json(json!({ "validators": chain.validators() })),
+    )
 }
 
 /// GET /ws/events (upgraded) — push channel for browsers: gossip records,
