@@ -519,29 +519,55 @@ records by this field. Existing record types are reused — no new on-chain sche
 - **Open question resolved**: Option 1 chosen — dApps are served by the node at
   `/dapp/<name>` and accessed via browser or external WebView. No embedded Tauri
   WebViews for dApps. Users can open dApps in any browser by navigating to the node's
-  URL.
+   URL.
 
-### Note: Frontend/Backend Symlink Coupling
+### Decoupling & Emoji Fix (Completed)
+- Replaced symlinks (`prototypeC/frontend`, `prototypeC/node`) with real directory
+  copies so Prototype C can evolve independently from Prototype B.
+- Reverted `prototypeB/` to the `3f58d0d` (community-only) state — removed all
+  blockchain/Notes experiments that had leaked into Prototype B via the symlinks.
+- Fixed emoji rendering: copied `NotoColorEmoji-Regular.ttf` to
+  `prototypeC/frontend/public/assets/fonts/` and wired it into `main.css` via
+  `@font-face` with `font-display: swap`. Vite copies it to `dist/assets/fonts/`
+  and the node serves it at `/assets/fonts/NotoColorEmoji-Regular.ttf`.
+- Fixed `vite.config.ts` `base: './'` so asset paths resolve correctly in the
+  Tauri WebView and self-hosted node context.
+- Added `test_multi_identity.js` e2e test: 3 distinct identities, community creation,
+  member promotion, and text/image/video/audio media visibility verification.
+- Updated `scripts/setup.js` to copy directories instead of creating symlinks.
 
-The `prototypeC/frontend` and `prototypeC/node` directories are symlinks to
-`prototypeB/frontend` and `prototypeB/node` respectively (see `scripts/setup.js`).
-This means any change to `prototypeB` — whether the Rust node (backend) or the
-SolidJS frontend — is automatically picked up by `prototypeC`.
+### Frontend/Node Ownership Note
 
-**Risk**: If `prototypeB` is updated and only the backend or frontend is changed
-(say, a new `/api/chain/*` endpoint or a changed payload format), the symlinked
-frontend will not match the backend, leading to runtime errors in the Tauri shell.
+The `prototypeC/frontend` and `prototypeC/node` directories were **decoupled**
+from `prototypeB` — they are now real directory copies, not symlinks.
 
-**Recommendation**: As the codebase grows, replace the symlinks with a one-time
-copy of the frontend so `prototypeC` can be stabilized independently:
+**Why:** Symlinks created a coupling risk where Prototype B changes (e.g. the
+blockchain or Notes dApp experiments) leaked into Prototype C silently. The
+copy approach lets each prototype evolve independently.
 
+**Procedure used:**
+1. Broke the symlinks (`rmdir prototypeC/frontend`, `rmdir prototypeC/node`).
+2. Copied the current (feature-complete) `prototypeB/frontend` and
+   `prototypeB/node` into `prototypeC/` as real directories.
+3. Reverted `prototypeB/` to its pre-experiment state (`3f58d0d`) — restoring
+   clean community-only code while Prototype C retains all experimental features
+   (chain, notes, dApp router) as independent copies.
+4. Updated `scripts/setup.js` `linkSources()` to use `fs.cpSync` (copy) instead
+   of `fs.symlinkSync` (symlink) when directories don't yet exist.
+
+To re-sync from a future Prototype B commit:
 ```bash
-rm prototypeC/frontend
+rm -rf prototypeC/frontend prototypeC/node
 cp -r prototypeB/frontend prototypeC/frontend
+cp -r prototypeB/node prototypeC/node
 ```
 
-If the symlink approach is kept, ensure that backend and frontend changes in
-`prototypeB` are always applied in the same atomic commit so they stay in sync.
+**Emoji font fix**: The NotoColorEmoji-Regular.ttf font was copied into
+`prototypeC/frontend/public/assets/fonts/` and referenced via `@font-face` with
+an absolute URL (`/assets/fonts/NotoColorEmoji-Regular.ttf`) in `main.css`.
+This avoids bundling the 25 MB font into every Vite build chunk. Vite copies the
+`public/` directory to `dist/` as-is, and the node serves it via the existing
+`/assets` static-file route.
 
 ---
 

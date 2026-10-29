@@ -1,0 +1,32 @@
+[package]
+name = "ddn-node"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["serde"] }
+rand = "0.8"
+hex = "0.4"
+base64 = "0.22"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+futures = "0.3"
+libp2p = { version = "0.52", features = ["tokio", "gossipsub", "kad", "mdns", "noise", "yamux", "tcp", "dns", "identify", "macros"], default-features = false }
+x25519-dalek = { version = "2", features = ["serde", "static_secrets"] }
+curve25519-dalek = { version = "4", features = ["serde"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", features = ["simple"] }
+zeroize = "1"
+tokio-util = "0.7"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+[profile.release]
+opt-level = 3

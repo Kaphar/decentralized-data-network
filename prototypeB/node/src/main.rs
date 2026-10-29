@@ -1,12 +1,10 @@
 #![allow(dead_code)]
 
-mod chain;
 mod crypto;
 mod p2p;
 mod records;
 mod storage;
 
-use axum::response::Redirect;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -43,8 +41,6 @@ struct AppState {
     connected_peers: Arc<RwLock<HashMap<String, Vec<String>>>>,
     p2p_port: u16,
     data_dir: PathBuf,
-    frontend_path: String,
-    chain: Option<Arc<chain::AnchorChain>>,
 }
 /// Fan out an event JSON string to all connected browser clients.
 fn emit(state: &AppState, event: serde_json::Value) {
@@ -218,41 +214,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Identity persistence (Phase 5) ---------------------------------
     let identity_path = crypto::identity_file_path(&data_path);
-    let (keypair_arc_opt, pub_key, locked, encrypted_identity, auto_unlock) =
-        if identity_path.exists() {
-            match crypto::read_identity_file(&identity_path) {
-                Ok(file) => {
-                    let au = file.auto_unlock;
-                    if file.auto_unlock {
-                        match crypto::load_identity_file(&file, "") {
-                            Ok(kp) => (Some(Arc::new(kp)), file.pubkey.clone(), false, None, au),
-                            Err(e) => {
-                                warn!("auto-unlock failed ({}), starting locked", e);
-                                (None, file.pubkey.clone(), true, Some(file), au)
-                            }
+    let (keypair_arc_opt, pub_key, locked, encrypted_identity, auto_unlock) = if identity_path.exists() {
+        match crypto::read_identity_file(&identity_path) {
+            Ok(file) => {
+                let au = file.auto_unlock;
+                if file.auto_unlock {
+                    match crypto::load_identity_file(&file, "") {
+                        Ok(kp) => (Some(Arc::new(kp)), file.pubkey.clone(), false, None, au),
+                        Err(e) => {
+                            warn!("auto-unlock failed ({}), starting locked", e);
+                            (None, file.pubkey.clone(), true, Some(file), au)
                         }
-                    } else {
-                        (None, file.pubkey.clone(), true, Some(file), au)
                     }
-                }
-                Err(e) => {
-                    warn!("identity file unreadable ({}), generating new identity", e);
-                    let kp = crypto::Keypair::generate();
-                    let pk = crypto::pubkey_to_cid(&kp.public_key_bytes());
-                    crypto::save_identity_to_disk(&identity_path, &kp, "", true)
-                        .map_err(|e| format!("failed to save identity: {}", e))?;
-                    info!("Generated and saved new identity: {}", pk);
-                    (Some(Arc::new(kp)), pk, false, None, true)
+                } else {
+                    (None, file.pubkey.clone(), true, Some(file), au)
                 }
             }
-        } else {
-            let kp = crypto::Keypair::generate();
-            let pk = crypto::pubkey_to_cid(&kp.public_key_bytes());
-            crypto::save_identity_to_disk(&identity_path, &kp, "", true)
-                .map_err(|e| format!("failed to save identity: {}", e))?;
-            info!("Generated and saved new identity: {}", pk);
-            (Some(Arc::new(kp)), pk, false, None, true)
-        };
+            Err(e) => {
+                warn!("identity file unreadable ({}), generating new identity", e);
+                let kp = crypto::Keypair::generate();
+                let pk = crypto::pubkey_to_cid(&kp.public_key_bytes());
+                crypto::save_identity_to_disk(&identity_path, &kp, "", true)
+                    .map_err(|e| format!("failed to save identity: {}", e))?;
+                info!("Generated and saved new identity: {}", pk);
+                (Some(Arc::new(kp)), pk, false, None, true)
+            }
+        }
+    } else {
+        let kp = crypto::Keypair::generate();
+        let pk = crypto::pubkey_to_cid(&kp.public_key_bytes());
+        crypto::save_identity_to_disk(&identity_path, &kp, "", true)
+            .map_err(|e| format!("failed to save identity: {}", e))?;
+        info!("Generated and saved new identity: {}", pk);
+        (Some(Arc::new(kp)), pk, false, None, true)
+    };
 
     info!("Node public key (author): {}", pub_key);
     info!("Data directory: {}", data_dir);
@@ -276,33 +271,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    let frontend_path = std::env::var("DDN_FRONTEND_PATH").unwrap_or_else(|_| {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let candidate = PathBuf::from(manifest_dir).join("../frontend");
-        if candidate.join("dist/index.html").exists() {
-            candidate.join("dist").to_string_lossy().to_string()
-        } else if candidate.join("index.html").exists() {
-            candidate.to_string_lossy().to_string()
-        } else {
-            "./frontend".to_string()
-        }
-    });
-    println!("frontend path: {}", frontend_path);
-
-    let enable_chain = std::env::var("DDN_ENABLE_CHAIN").as_deref().unwrap_or("0") == "1";
-    let chain: Option<Arc<chain::AnchorChain>> = if enable_chain {
-        if let Some(kp) = &keypair_arc_opt {
-            let mut c = chain::AnchorChain::new(&data_path, kp);
-            c.start_producer(10);
-            Some(Arc::new(c))
-        } else {
-            eprintln!("chain enabled but no keypair available (locked)");
-            None
-        }
-    } else {
-        None
-    };
-
     let state = Arc::new(AppState {
         store,
         keypair: Arc::new(RwLock::new(keypair_arc_opt)),
@@ -317,8 +285,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         connected_peers: connected_peers.clone(),
         p2p_port,
         data_dir: data_path.clone(),
-        frontend_path: frontend_path.clone(),
-        chain,
     });
 
     // --- Start libp2p swarm (only if identity is unlocked) ---------------
@@ -333,6 +299,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
+
+    let frontend_path = std::env::var("DDN_FRONTEND_PATH").unwrap_or_else(|_| {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let candidate = PathBuf::from(manifest_dir).join("../frontend");
+        if candidate.join("dist/index.html").exists() {
+            candidate.join("dist").to_string_lossy().to_string()
+        } else if candidate.join("index.html").exists() {
+            candidate.to_string_lossy().to_string()
+        } else {
+            "./frontend".to_string()
+        }
+    });
 
     let app = Router::new()
         .route(
@@ -356,14 +334,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/webrtc/signal", post(webrtc_signal))
         .route("/api/report", post(create_report_endpoint))
         .route("/api/moderation", get(moderation_status))
-        .route(
-            "/api/community",
-            post(create_community_endpoint).get(list_communities),
-        )
-        .route(
-            "/api/community/membership",
-            post(promote_community_moderator_endpoint),
-        )
+        .route("/api/community", post(create_community_endpoint).get(list_communities))
+        .route("/api/community/membership", post(promote_community_moderator_endpoint))
         .route("/api/peers", post(add_peer).get(list_peers))
         .route("/api/sync", post(sync))
         .route("/api/identity", get(get_identity).delete(delete_identity))
@@ -374,21 +346,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/identity/import", post(import_identity))
         .route("/api/network", get(network_status))
         .route("/api/network/connect", post(network_connect))
-        .route("/dapp/guestbook", get(serve_guestbook))
-        .route("/dapp/:name", get(serve_dapp))
-        .route("/api/chain/anchor", post(chain_anchor))
-        .route("/api/chain/block/:height", get(chain_block))
-        .route("/api/chain/block/latest", get(chain_latest_block))
-        .route("/api/chain/record/:cid", get(chain_record_status))
-        .route("/api/chain/validators", get(chain_validators))
         .route("/ws/events", get(ws_events))
         .route("/", get(serve_frontend))
         .nest_service("/static", ServeDir::new(&frontend_path))
-        .nest_service(
-            "/assets",
-            ServeDir::new(format!("{}/assets", frontend_path)),
-        )
-        .nest_service("/dapps", ServeDir::new(format!("{}/dapps", frontend_path)))
+        .nest_service("/assets", ServeDir::new(format!("{}/assets", frontend_path)))
         .with_state(state)
         .layer(cors);
 
@@ -422,149 +383,6 @@ async fn serve_frontend() -> impl IntoResponse {
         .unwrap_or_else(|_| "<html><body><h1>Frontend not found</h1><p>Run <code>npm run build</code> in <code>prototypeB/frontend/</code> first.</p></body></html>".to_string());
     info!("Serving frontend from: {}", path.display());
     Html(html)
-}
-
-async fn serve_guestbook() -> impl IntoResponse {
-    let html = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>DDN Guestbook</title>
-    <style>
-        body { font-family: sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; }
-        .post { border: 1px solid #ddd; padding: 12px; margin: 10px 0; border-radius: 6px; }
-        .form-row { display: flex; gap: 8px; }
-        input, textarea { padding: 8px; border: 1px solid #ccc; border-radius: 4px; flex: 1; }
-        button { padding: 8px 16px; border: none; background: #007bff; color: white; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #0056b3; }
-        .error { color: #d32f2f; }
-    </style>
-</head>
-<body>
-    <h1>Decentralized Guestbook</h1>
-    <p>This is a network-distributed dApp served by the DDN node at <code>/dapp/guestbook</code>.</p>
-
-    <h2>Sign In</h2>
-    <div class="form-row">
-        <input type="text" id="pubkey" placeholder="Your pubkey (hex)" />
-        <button onclick="signIn()">Unlock Identity</button>
-    </div>
-    <div id="identity-status"></div>
-
-    <h2>Guestbook Posts</h2>
-    <button onclick="loadPosts()">Refresh</button>
-    <div id="posts"></div>
-
-    <h2>Sign a Post</h2>
-    <textarea id="message" rows="3" placeholder="Write a message..." style="width:100%"></textarea>
-    <div class="form-row">
-        <input type="password" id="password" placeholder="Signing password (empty if unlocked)" />
-        <button onclick="signAndPost()">Sign & Post</button>
-    </div>
-    <div id="post-status"></div>
-
-    <script>
-        let keypair = null;
-
-        async function signIn() {
-            const pubkeyInput = document.getElementById('pubkey').value.trim();
-            const resp = await fetch('/api/identity');
-            const info = await resp.json();
-            if (info.locked) {
-                document.getElementById('identity-status').innerHTML =
-                    '<span class="error">Identity is locked. Enter your password below.</span>';
-            } else {
-                document.getElementById('identity-status').innerHTML =
-                    'Unlocked as: ' + info.pubkey.slice(0, 16) + '...';
-            }
-        }
-
-        async function signAndPost() {
-            const message = document.getElementById('message').value.trim();
-            if (!message) return alert('Message required');
-            const password = document.getElementById('password').value;
-
-            const ts = Date.now();
-            const payload = JSON.stringify({ text: message, dapp: 'guestbook' });
-
-            const signResp = await fetch('/api/record/sign', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ type: 'post', author: (await (await fetch('/api/identity')).json()).pubkey, prev: null, ts, payload: JSON.parse(payload) })
-            });
-            const signed = await signResp.json();
-
-            const submitResp = await fetch('/api/record', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(signed)
-            });
-            const result = await submitResp.json();
-            document.getElementById('post-status').innerHTML =
-                '<span style="color:green">Posted! ID: ' + result.id + '</span>';
-            document.getElementById('message').value = '';
-        }
-
-        async function loadPosts() {
-            const resp = await fetch('/api/wall');
-            const data = await resp.json();
-            const guestbookPosts = data.posts.filter(r => {
-                const p = r.payload || {};
-                return p.dapp === 'guestbook';
-            }).sort((a, b) => b.ts - a.ts);
-
-            const postsDiv = document.getElementById('posts');
-            if (guestbookPosts.length === 0) {
-                postsDiv.innerHTML = '<p>No posts yet. Be the first!</p>';
-                return;
-            }
-            postsDiv.innerHTML = guestbookPosts.map(r =>
-                '<div class="post"><div>' + (r.payload.text || '') + '</div><div style="font-size:0.8em;color:#666">' +
-                new Date(r.ts).toLocaleString() + ' · ' + r.author.slice(0, 12) + '...</div></div>'
-            ).join('');
-        }
-
-        loadPosts();
-    </script>
-</body>
-</html>"#;
-    Html(html)
-}
-
-/// Resolve the directory holding built dApp assets. Prefers DDN_DAPPS_DIR (so
-/// operators/users can drop dApps without a node rebuild), then falls back to
-/// the frontend build output: <frontend_path>/dapps/<name>.
-fn dapps_dir(frontend_path: &str) -> PathBuf {
-    if let Ok(d) = std::env::var("DDN_DAPPS_DIR") {
-        if !d.is_empty() {
-            return PathBuf::from(d);
-        }
-    }
-    PathBuf::from(frontend_path).join("dapps")
-}
-
-/// GET /dapp/:name — serve a standalone dApp built from src/pages/<name>.
-/// dApps are built into <frontend>/dapps/<name>/{index.html, index-*.js, assets/*}.
-/// We serve the whole tree via the `/dapps` static nest (so the HTML's relative
-/// `assets/` references resolve correctly), so /dapp/:name just redirects to
-/// /dapps/<name>/.
-async fn serve_dapp(
-    State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-) -> Result<Redirect, (StatusCode, Html<String>)> {
-    let ddir = dapps_dir(&state.frontend_path);
-    let target = ddir.join(&name).join("index.html");
-    if target.exists() {
-        Ok(Redirect::permanent(&format!("/dapps/{name}/index.html")))
-    } else {
-        Err((
-            StatusCode::NOT_FOUND,
-            Html(format!(
-                "<html><body><h1>dApp not found: {name}</h1><p>Build the frontend so dist/dapps/{name}/index.html exists, or set DDN_DAPPS_DIR.</p></body></html>"
-            )),
-        ))
-    }
 }
 
 async fn get_identity(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -1637,7 +1455,10 @@ fn compute_moderation_sets(
                 .get("target_pubkey")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            let role = payload
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
 
             if let Some(info) = communities.get_mut(community_cid) {
                 // Only honor "moderator" role promotions.
@@ -1803,7 +1624,11 @@ async fn create_community_endpoint(
     }
     emit(&state, json!({ "type": "record", "record": &record }));
 
-    (StatusCode::CREATED, Json(CommunityResponse { id, record })).into_response()
+    (
+        StatusCode::CREATED,
+        Json(CommunityResponse { id, record }),
+    )
+        .into_response()
 }
 
 /// GET /api/community — list all known community records.
@@ -1958,136 +1783,6 @@ async fn network_connect(
     }
 }
 
-// ---------------------------------------------------------------------------
-// C-2: Blockchain Anchor Chain handlers
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-struct AnchorRequest {
-    author: String,
-    record_cid: String,
-    ts: u64,
-    sig: String,
-}
-
-async fn chain_anchor(
-    State(state): State<Arc<AppState>>,
-    bytes: axum::body::Bytes,
-) -> impl IntoResponse {
-    let chain = match &state.chain {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "anchor chain not enabled (DDN_ENABLE_CHAIN=1)" })),
-            );
-        }
-    };
-
-    let req: AnchorRequest = match serde_json::from_slice(&bytes) {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": format!("invalid request: {}", e) })),
-            );
-        }
-    };
-
-    if chain
-        .anchor_cid(&req.author, &req.record_cid, req.ts, &req.sig)
-        .await
-    {
-        (StatusCode::ACCEPTED, Json(json!({ "status": "anchoring" })))
-    } else {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "failed to queue anchor" })),
-        )
-    }
-}
-
-async fn chain_block(
-    State(state): State<Arc<AppState>>,
-    Path(height): Path<u64>,
-) -> impl IntoResponse {
-    let chain = match &state.chain {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "anchor chain not enabled" })),
-            );
-        }
-    };
-
-    match chain.block_at(height).await {
-        Some(block) => (StatusCode::OK, Json(json!({ "block": block }))),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": format!("block {} not found", height) })),
-        ),
-    }
-}
-
-async fn chain_latest_block(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let chain = match &state.chain {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "anchor chain not enabled" })),
-            );
-        }
-    };
-
-    let block = chain.latest_block().await;
-    (StatusCode::OK, Json(json!({ "block": block })))
-}
-
-async fn chain_record_status(
-    State(state): State<Arc<AppState>>,
-    Path(cid): Path<String>,
-) -> impl IntoResponse {
-    let chain = match &state.chain {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "anchor chain not enabled" })),
-            );
-        }
-    };
-
-    match chain.anchor_status(&cid).await {
-        Some(height) => (
-            StatusCode::OK,
-            Json(json!({ "cid": cid, "height": height })),
-        ),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "cid": cid, "height": null })),
-        ),
-    }
-}
-
-async fn chain_validators(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let chain = match &state.chain {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "anchor chain not enabled" })),
-            );
-        }
-    };
-
-    (
-        StatusCode::OK,
-        Json(json!({ "validators": chain.validators() })),
-    )
-}
-
 /// GET /ws/events (upgraded) — push channel for browsers: gossip records,
 /// locally created records and peer connect/disconnect notifications.
 async fn ws_events(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -2126,40 +1821,5 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                 _ => {} // ignore client pings/text
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn dapps_dir_env_takes_priority_over_frontend_path() {
-        let env_dir = std::env::temp_dir().join("ddn_dapp_test_env");
-        let _ = std::fs::create_dir_all(&env_dir);
-        std::env::set_var("DDN_DAPPS_DIR", env_dir.as_os_str());
-        let got = dapps_dir("/some/frontend/dist");
-        assert_eq!(got, env_dir);
-        std::env::remove_var("DDN_DAPPS_DIR");
-        let _ = std::fs::remove_dir_all(&env_dir);
-    }
-
-    #[test]
-    fn dapps_dir_falls_back_to_frontend_path_join_dapps() {
-        std::env::remove_var("DDN_DAPPS_DIR");
-        let got = dapps_dir("/opt/ddn/frontend/dist");
-        assert_eq!(got, PathBuf::from("/opt/ddn/frontend/dist/dapps"));
-    }
-
-    #[test]
-    fn serve_dapp_redirect_target_layout() {
-        // Mirrors serve_dapp: /dapp/<name> -> 308 -> /dapps/<name>/index.html
-        // so relative asset refs in the dApp HTML resolve against /dapps/<name>/.
-        fn redirect_url(name: &str) -> String {
-            format!("/dapps/{name}/index.html")
-        }
-        assert_eq!(redirect_url("chaindemo"), "/dapps/chaindemo/index.html");
-        assert_eq!(redirect_url("guestbook"), "/dapps/guestbook/index.html");
     }
 }

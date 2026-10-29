@@ -32,13 +32,28 @@ function buildFrontend() {
 function linkSources() {
   const srcNode = path.resolve(root, '..', 'prototypeB', 'node');
   const srcFrontend = path.resolve(root, '..', 'prototypeB', 'frontend');
-  if (!fs.existsSync(nodeDir)) {
-    fs.symlinkSync(srcNode, nodeDir, 'dir');
-    log(`linked node -> ${srcNode}`);
+
+  function ensureCopied(src, dest) {
+    if (fs.existsSync(dest) && !fs.lstatSync(dest).isSymbolicLink()) {
+      log(`already copied: ${dest}`);
+      return;
+    }
+    if (fs.lstatSync(dest).isSymbolicLink()) {
+      fs.unlinkSync(dest);
+    }
+    if (!fs.existsSync(src)) {
+      log(`ERROR: source not found: ${src}`);
+      process.exit(1);
+    }
+    fs.cpSync(src, dest, { recursive: true });
+    log(`copied ${src} -> ${dest}`);
   }
-  if (!fs.existsSync(frontendDir)) {
-    fs.symlinkSync(srcFrontend, frontendDir, 'dir');
-    log(`linked frontend -> ${srcFrontend}`);
+
+  if (!fs.existsSync(nodeDir) || fs.lstatSync(nodeDir).isSymbolicLink()) {
+    ensureCopied(srcNode, nodeDir);
+  }
+  if (!fs.existsSync(frontendDir) || fs.lstatSync(frontendDir).isSymbolicLink()) {
+    ensureCopied(srcFrontend, frontendDir);
   }
 }
 

@@ -1,0 +1,5 @@
+{
+  "format": "json",
+  "name": "DDN Node Config",
+  "description": "Configuration for the Decentralized Data Network Rust node"
+}

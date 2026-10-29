@@ -1,27 +1,6 @@
 import { Component, createSignal, createEffect, onCleanup, Show, For } from 'solid-js';
-import { resolveUrl } from '../../api';
-
-interface ChainBlockHeader {
-  height: number;
-  parent_hash: string;
-  timestamp: number;
-  proposer: string;
-  merkle_root: string;
-  nonce: number;
-  hash: string;
-}
-
-interface ChainBlock {
-  header: ChainBlockHeader;
-  txs: Array<{ author: string; record_cid: string; ts: number; sig: string }>;
-}
-
-interface AnchorTxInput {
-  author: string;
-  record_cid: string;
-  ts: number;
-  sig: string;
-}
+import { fetchIdentity, signRecord, submitRecord, fetchLatestBlock, fetchValidators, fetchBlock, anchorRecord } from '../../api';
+import type { ChainBlock } from '../../types';
 
 function truncate(s: string, n = 12): string {
   if (!s) return '';
@@ -30,18 +9,6 @@ function truncate(s: string, n = 12): string {
 
 function fmtTs(ts: number): string {
   return new Date(ts).toLocaleString();
-}
-
-async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
-  const resp = await fetch(resolveUrl(path), {
-    headers: { 'Content-Type': 'application/json', ...opts.headers },
-    ...opts,
-  });
-  if (!resp.ok) {
-    const txt = await resp.text().catch(() => '');
-    throw new Error(`HTTP ${resp.status}: ${txt}`);
-  }
-  return resp.json() as Promise<T>;
 }
 
 export const ChainDemo: Component = () => {
@@ -54,8 +21,8 @@ export const ChainDemo: Component = () => {
 
   const loadLatest = async () => {
     try {
-      const data = await api<{ block: ChainBlock }>('/api/chain/block/latest');
-      setLatestBlock(data.block);
+      const data = await fetchLatestBlock();
+      setLatestBlock(data);
     } catch (e) {
       setError(String(e));
     }
@@ -63,8 +30,8 @@ export const ChainDemo: Component = () => {
 
   const loadValidators = async () => {
     try {
-      const data = await api<{ validators: string[] }>('/api/chain/validators');
-      setValidators(data.validators);
+      const data = await fetchValidators();
+      setValidators(data);
     } catch (e) {
       setError(String(e));
     }
@@ -73,12 +40,12 @@ export const ChainDemo: Component = () => {
   const loadHistory = async () => {
     setLoadingHistory(true);
     try {
-      const latest = await api<{ block: ChainBlock }>('/api/chain/block/latest');
-      const height = latest.block.header.height;
+      const latest = await fetchLatestBlock();
+      const height = latest.header.height;
       const blocks: ChainBlock[] = [];
       for (let h = height; h >= 0; h--) {
-        const data = await api<{ block: ChainBlock } | null>(`/api/chain/block/${h}`);
-        if (data) blocks.push(data.block);
+        const data = await fetchBlock(h);
+        if (data) blocks.push(data);
       }
       setAllBlocks(blocks);
     } catch (e) {
@@ -99,33 +66,22 @@ export const ChainDemo: Component = () => {
     setLoading(true);
     setError(null);
     try {
-      const identity = await api<{ pubkey: string; locked: boolean }>('/api/identity');
+      const identity = await fetchIdentity();
       if (identity.locked) throw new Error('Identity is locked — unlock first.');
 
       const ts = Date.now();
       const payload = { text: 'Direct blockchain anchor test', dapp: 'blockchain-demo' };
-      const signed = await api<{
-        id: string; author: string; sig: string; payload: unknown;
-      }>('/api/record/sign', {
-        method: 'POST',
-        body: JSON.stringify({ type: 'post', author: identity.pubkey, prev: null, ts, payload }),
-      });
+      const signed = await signRecord('post', identity.pubkey, null, ts, payload);
 
-      const submitted = await api<{ id: string }>('/api/record', {
-        method: 'POST',
-        body: JSON.stringify(signed),
-      });
+      const submitted = await submitRecord(signed);
 
-      const tx: AnchorTxInput = {
+      if (!signed.sig) throw new Error('Signed record has no signature');
+
+      const result = await anchorRecord({
         author: signed.author,
         record_cid: submitted.id,
         ts: Math.floor(ts / 1000),
         sig: signed.sig,
-      };
-
-      const result = await api<{ status: string }>('/api/chain/anchor', {
-        method: 'POST',
-        body: JSON.stringify(tx),
       });
 
       setError(`✓ Anchored record ${truncate(submitted.id)} into the chain. ${result.status}`);
