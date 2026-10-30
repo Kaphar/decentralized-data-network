@@ -27,6 +27,7 @@ import type {
   ChainProofResponse,
   ChainVerifyResponse,
   ChainVotesResponse,
+  BlockSignature,
 } from '../types';
 
 function getStoredApiBase(): string {
@@ -345,7 +346,7 @@ export interface WebrtcSignalPayload {
 }
 
 export async function sendWebrtcSignal(payload: WebrtcSignalPayload): Promise<void> {
-  const resp = await fetch(resolveUrl('/api/webrtc/signal'), {
+  const resp = await fetch(resolveUrl('/api/media/signal'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ payload: btoa(JSON.stringify(payload)) }),
@@ -390,11 +391,12 @@ export async function fetchCommunities(): Promise<BaseRecord[]> {
 export async function createCommunity(
   name: string,
   description: string,
+  is_private: boolean = false,
 ): Promise<{ id: string; record: BaseRecord }> {
   const resp = await fetch(resolveUrl('/api/community'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, description }),
+    body: JSON.stringify({ name, description, is_private }),
   });
   if (!resp.ok) {
     const err = await resp.json();
@@ -407,15 +409,27 @@ export async function promoteCommunityModerator(
   community_cid: string,
   target_pubkey: string,
   role: string,
+  encrypted_group_key?: string,
 ): Promise<{ id: string; record: BaseRecord }> {
   const resp = await fetch(resolveUrl('/api/community/membership'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ community_cid, target_pubkey, role }),
+    body: JSON.stringify({ community_cid, target_pubkey, role, encrypted_group_key }),
   });
   if (!resp.ok) {
     const err = await resp.json();
     throw new Error(err.error || 'Failed to promote community moderator');
+  }
+  return resp.json();
+}
+
+export async function getCommunityGroupKey(
+  community_cid: string,
+): Promise<{ community_cid: string; group_key: string }> {
+  const resp = await fetch(resolveUrl(`/api/community/key/${community_cid}`));
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error || `Failed to fetch group key (HTTP ${resp.status})`);
   }
   return resp.json();
 }
@@ -572,9 +586,85 @@ export async function anchorRecord(tx: AnchorTxInput): Promise<ChainAnchorRespon
   return data;
 }
 
+export interface AnchorPayloadInput {
+  author: string;
+  record_cid: string;
+  ts: number;
+  sig: string;
+  payload_data: string;
+  content_type: string;
+}
+
+export async function anchorPayload(tx: AnchorPayloadInput): Promise<ChainAnchorResponse> {
+  const resp = await fetch(resolveUrl('/api/chain/anchor-payload'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(tx),
+  });
+  const data = await resp.json().catch(() => ({ status: 'error' }));
+  if (!resp.ok) {
+    throw new Error(data.error || `Failed to anchor payload (HTTP ${resp.status})`);
+  }
+  return data;
+}
+
+// ── Chain Consensus API ────────────────────────────────────────────
+
+export interface ChainProposal {
+  header: ChainBlockHeader;
+  txs: ChainTx[];
+  signatures: BlockSignature[];
+}
+
+export interface SignBlockRequest {
+  block_hash: string;
+}
+
+export interface SignBlockResponse {
+  validator_cid: string;
+  signature: string;
+}
+
+export interface CommitBlockRequest {
+  block: ChainBlock;
+}
+
+export async function fetchProposals(): Promise<ChainProposal[]> {
+  const resp = await fetch(resolveUrl('/api/chain/proposals'));
+  if (!resp.ok) throw new Error('Failed to fetch proposals');
+  const data = await resp.json();
+  return data.proposals;
+}
+
+export async function signBlock(block_hash: string): Promise<SignBlockResponse> {
+  const resp = await fetch(resolveUrl('/api/chain/sign'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ block_hash }),
+  });
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    throw new Error(data.error || 'Failed to sign block');
+  }
+  return resp.json();
+}
+
+export async function commitBlock(block: ChainBlock): Promise<{ status: string }> {
+  const resp = await fetch(resolveUrl('/api/chain/commit'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ block }),
+  });
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    throw new Error(data.error || 'Failed to commit block');
+  }
+  return resp.json();
+}
+
 // ── DApp Management API ───────────────────────────────────────────
 
-export interface DappInfo {
+export interface DappListResponse {
   dapps: string[];
   dir: string;
 }
@@ -590,7 +680,7 @@ export interface InstallDappResponse {
   url: string;
 }
 
-export async function listDapps(): Promise<DappInfo> {
+export async function listDapps(): Promise<DappListResponse> {
   const resp = await fetch(resolveUrl('/api/dapps'));
   if (!resp.ok) throw new Error('Failed to list dApps');
   return resp.json();
@@ -602,9 +692,82 @@ export async function installDapp(req: InstallDappRequest): Promise<InstallDappR
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
   });
-  if (!resp.ok) {
+   if (!resp.ok) {
     const data = await resp.json().catch(() => ({}));
     throw new Error(data.error || `Failed to install dApp (HTTP ${resp.status})`);
   }
+  return resp.json();
+}
+
+export interface SetDappsDirRequest {
+  path: string;
+}
+
+export interface SetDappsDirResponse {
+  status: string;
+  dir: string;
+}
+
+export async function setDappsDir(req: SetDappsDirRequest): Promise<SetDappsDirResponse> {
+  const resp = await fetch(resolveUrl('/api/dapps/dir'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to set dApp directory (HTTP ${resp.status})`);
+  }
+  return resp.json();
+}
+
+// ── dApp Gossip Record Registration ────────────────────────────────
+
+export interface DappRegisterRequest {
+  name: string;
+  description: string;
+  version: string;
+  url: string;
+  icon?: string;
+  source_cid?: string;
+  is_encrypted?: boolean;
+}
+
+export interface DappRegisterResponse {
+  id: string;
+  record: any;
+}
+
+export interface DappInfo {
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  url: string;
+  icon?: string;
+  source_cid?: string;
+  is_encrypted: boolean;
+  author: string;
+  ts: number;
+}
+
+export async function registerDapp(
+  req: DappRegisterRequest
+): Promise<DappRegisterResponse> {
+  const resp = await fetch(resolveUrl('/api/dapp/register'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    throw new Error(data.error || `Failed to register dApp (HTTP ${resp.status})`);
+  }
+  return resp.json();
+}
+
+export async function discoverDapps(): Promise<{ dapps: DappInfo[]; count: number }> {
+  const resp = await fetch(resolveUrl('/api/dapp/discover'));
+  if (!resp.ok) throw new Error('Failed to discover dApps');
   return resp.json();
 }

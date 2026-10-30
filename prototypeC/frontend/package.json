@@ -14,6 +14,7 @@
     "solid-js": "^1.8.0"
   },
   "devDependencies": {
+    "@tauri-apps/api": "^2.12.4",
     "@types/node": "^20",
     "typescript": "^5",
     "vite": "^5",

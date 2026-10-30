@@ -44,7 +44,8 @@ struct AppState {
     p2p_port: u16,
     data_dir: PathBuf,
     frontend_path: String,
-    dapps_dir: PathBuf,
+    dapps_dir: Arc<RwLock<PathBuf>>,
+    group_keys: Arc<RwLock<HashMap<String, String>>>,
     chain: Option<Arc<chain::AnchorChain>>,
 }
 /// Fan out an event JSON string to all connected browser clients.
@@ -293,7 +294,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let enable_chain = std::env::var("DDN_ENABLE_CHAIN").as_deref().unwrap_or("0") == "1";
     let chain: Option<Arc<chain::AnchorChain>> = if enable_chain {
         if let Some(kp) = &keypair_arc_opt {
+            let extra_validators: Vec<String> = std::env::var("DDN_VALIDATORS")
+                .as_deref()
+                .unwrap_or("")
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim().to_string())
+                .collect();
             let mut c = chain::AnchorChain::new(&data_path, kp);
+            c = c.with_validators(extra_validators);
             c.start_producer(10);
             Some(Arc::new(c))
         } else {
@@ -319,7 +328,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         p2p_port,
         data_dir: data_path.clone(),
         frontend_path: frontend_path.clone(),
-        dapps_dir: dapps_dir(&frontend_path),
+        dapps_dir: Arc::new(RwLock::new(dapps_dir(&frontend_path))),
+        group_keys: Arc::new(RwLock::new(HashMap::new())),
         chain,
     });
 
@@ -355,7 +365,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/media/offer", post(media_offer_endpoint))
         .route("/api/media/accept", post(media_accept_endpoint))
         .route("/api/media/keypair", post(generate_keypair_endpoint))
-        .route("/api/webrtc/signal", post(webrtc_signal))
+        .route("/api/media/signal", post(webrtc_signal))
         .route("/api/report", post(create_report_endpoint))
         .route("/api/moderation", get(moderation_status))
         .route(
@@ -366,6 +376,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/community/membership",
             post(promote_community_moderator_endpoint),
         )
+        .route("/api/community/key/:cid", get(get_community_group_key))
+        .route("/api/dapp/register", post(register_dapp_endpoint))
+        .route("/api/dapp/discover", get(discover_dapps))
         .route("/api/peers", post(add_peer).get(list_peers))
         .route("/api/sync", post(sync))
         .route("/api/identity", get(get_identity).delete(delete_identity))
@@ -379,10 +392,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/dapp/guestbook", get(serve_guestbook))
         .route("/dapp/:name", get(serve_dapp))
         .route("/api/chain/anchor", post(chain_anchor))
+        .route("/api/chain/anchor-payload", post(chain_anchor_payload))
         .route("/api/chain/block/:height", get(chain_block))
         .route("/api/chain/block/latest", get(chain_latest_block))
         .route("/api/chain/record/:cid", get(chain_record_status))
         .route("/api/chain/validators", get(chain_validators))
+        .route("/api/chain/proposals", get(chain_proposals))
+        .route("/api/chain/sign", post(chain_sign_block))
+        .route("/api/chain/commit", post(chain_commit))
         .route("/api/dapps", get(list_dapps))
         .route("/api/dapps/install", post(install_dapp))
         .route("/ws/events", get(ws_events))
@@ -392,7 +409,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/assets",
             ServeDir::new(format!("{}/assets", frontend_path)),
         )
-        .nest_service("/dapps", ServeDir::new(dapps_dir(&frontend_path)))
+        .nest("/dapps", Router::new().fallback(get(serve_dapp_file)))
+        .route("/api/dapps/dir", post(set_dapps_dir))
         .with_state(state)
         .layer(cors);
 
@@ -545,7 +563,18 @@ fn dapps_dir(frontend_path: &str) -> PathBuf {
             return PathBuf::from(d);
         }
     }
-    PathBuf::from(frontend_path).join("dapps")
+    let fp = PathBuf::from(frontend_path);
+    let dapps = fp.join("dapps");
+    if dapps.is_dir() {
+        dapps
+    } else {
+        let dist_dapps = fp.join("dist").join("dapps");
+        if dist_dapps.is_dir() {
+            dist_dapps
+        } else {
+            dapps
+        }
+    }
 }
 
 /// GET /dapp/:name — serve a standalone dApp built from src/pages/<name>.
@@ -557,7 +586,7 @@ async fn serve_dapp(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Redirect, (StatusCode, Html<String>)> {
-    let ddir = &state.dapps_dir;
+    let ddir = state.dapps_dir.read().await.clone();
     let target = ddir.join(&name).join("index.html");
     if target.exists() {
         Ok(Redirect::permanent(&format!("/dapps/{name}/index.html")))
@@ -571,21 +600,137 @@ async fn serve_dapp(
     }
 }
 
+/// GET /dapps/*path — serve a static file from the runtime-configured dApps directory.
+/// This replaces the old nest_service static handler so the dApp directory can be
+/// changed at runtime via POST /api/dapps/dir without restarting the node.
+use axum::http::Uri;
+
+async fn serve_dapp_file(
+    State(state): State<Arc<AppState>>,
+    uri: Uri,
+) -> impl IntoResponse {
+    let ddir = state.dapps_dir.read().await.clone();
+    let raw_path = uri.path();
+
+    let path = raw_path
+        .strip_prefix("/dapps/")
+        .unwrap_or_else(|| raw_path.strip_prefix("/").unwrap_or(""));
+
+    let mut file_path = ddir.join(path);
+
+    if file_path.is_dir() {
+        file_path = file_path.join("index.html");
+    }
+
+    info!("Serving dApp file: path={}, resolved={}", path, file_path.display());
+
+    if file_path.is_file() {
+        match tokio::fs::read(&file_path).await {
+            Ok(contents) => {
+                let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("bin");
+                let mime = match ext {
+                    "html" => "text/html; charset=utf-8",
+                    "js" => "application/javascript; charset=utf-8",
+                    "css" => "text/css; charset=utf-8",
+                    "json" => "application/json",
+                    "png" => "image/png",
+                    "jpg" | "jpeg" => "image/jpeg",
+                    "svg" => "image/svg+xml",
+                    "ico" => "image/x-icon",
+                    "woff" => "font/woff",
+                    "woff2" => "font/woff2",
+                    "ttf" => "font/ttf",
+                    _ => "application/octet-stream",
+                };
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert("content-type", mime.parse().unwrap());
+                (StatusCode::OK, headers, contents).into_response()
+            }
+            Err(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Html("Failed to read file".to_string()),
+            )
+                .into_response(),
+        }
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Html(format!("File not found: {}", path)),
+        )
+            .into_response()
+    }
+}
+
+/// POST /api/dapps/dir — set the dApp directory at runtime. Requires unlocked identity.
+/// Body: { path: "<absolute_path>" }
+#[derive(Deserialize)]
+struct SetDappsDirRequest {
+    path: String,
+}
+
+async fn set_dapps_dir(
+    State(state): State<Arc<AppState>>,
+    bytes: axum::body::Bytes,
+) -> impl IntoResponse {
+    let locked = *state.locked.read().await;
+    if locked {
+        return (
+            StatusCode::LOCKED,
+            Json(json!({ "error": "Identity is locked — unlock first" })),
+        )
+            .into_response();
+    }
+
+    let req: SetDappsDirRequest = match serde_json::from_slice(&bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid request: {}", e) })),
+            )
+                .into_response();
+        }
+    };
+
+    let new_dir = PathBuf::from(&req.path);
+    if !new_dir.is_absolute() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "path must be absolute" })),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = std::fs::create_dir_all(&new_dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("cannot create directory: {}", e) })),
+        )
+            .into_response();
+    }
+
+    *state.dapps_dir.write().await = new_dir.clone();
+
+    Json(json!({
+        "status": "updated",
+        "dir": new_dir.to_string_lossy().to_string(),
+    }))
+        .into_response()
+}
+
 /// GET /api/dapps — list installed dApps by scanning dapps_dir for subdirs
 /// containing an index.html. Only returns the names (safe, no file contents).
 async fn list_dapps(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let ddir = &state.dapps_dir;
+    let ddir = state.dapps_dir.read().await.clone();
     let mut names: Vec<String> = Vec::new();
-    if ddir.exists() {
-        if let Ok(entries) = std::fs::read_dir(ddir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir()
-                    && path.join("index.html").exists()
-                {
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        names.push(name.to_string());
-                    }
+    if let Ok(entries) = std::fs::read_dir(&ddir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir()
+                && path.join("index.html").exists()
+            {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    names.push(name.to_string());
                 }
             }
         }
@@ -648,7 +793,7 @@ async fn install_dapp(
             .into_response();
     }
 
-    let dest = state.dapps_dir.join(&req.name);
+    let dest = state.dapps_dir.read().await.join(&req.name);
 
     // If a dApp with this name already exists, remove it first.
     if dest.exists() {
@@ -1526,7 +1671,7 @@ async fn generate_keypair_endpoint() -> impl IntoResponse {
     )
 }
 
-/// POST /api/webrtc/signal — forward a WebRTC signaling payload (SDP offer/answer
+/// POST /api/media/signal — forward a WebRTC signaling payload (SDP offer/answer
 /// or ICE candidate) to the peer-to-peer network. The payload is gossipsub'd on
 /// the `ddn/webrtc/v1` topic and arrives at all connected browser clients via
 /// /ws/events. The browser filters by the `target` field in the JSON payload.
@@ -1883,6 +2028,8 @@ async fn moderation_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
 struct CommunityCreateRequest {
     name: String,
     description: String,
+    #[serde(default)]
+    is_private: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1925,6 +2072,7 @@ async fn create_community_endpoint(
             "name": req.name,
             "description": req.description,
             "creator": state.pub_key.clone(),
+            "is_private": req.is_private,
         }),
     };
 
@@ -1947,7 +2095,16 @@ async fn create_community_endpoint(
     }
     emit(&state, json!({ "type": "record", "record": &record }));
 
-    (StatusCode::CREATED, Json(CommunityResponse { id, record })).into_response()
+    // For private communities, generate and store a random group key.
+    if req.is_private {
+        use rand::RngCore;
+        let mut key_bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut key_bytes);
+        let group_key = hex::encode(key_bytes);
+        state.group_keys.write().await.insert(id.clone(), group_key);
+    }
+
+    (StatusCode::CREATED, Json(json!({ "id": id, "record": record }))).into_response()
 }
 
 /// GET /api/community — list all known community records.
@@ -1971,6 +2128,9 @@ struct CommunityMembershipRequest {
     community_cid: String,
     target_pubkey: String,
     role: String,
+    /// Encrypted group key for private communities (base64-encoded X25519+AES-GCM sealed)
+    #[serde(default)]
+    encrypted_group_key: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2008,6 +2168,7 @@ async fn promote_community_moderator_endpoint(
             "community_cid": req.community_cid,
             "target_pubkey": req.target_pubkey,
             "role": req.role,
+            "encrypted_group_key": req.encrypted_group_key,
         }),
     };
 
@@ -2035,6 +2196,146 @@ async fn promote_community_moderator_endpoint(
         Json(CommunityMembershipResponse { id, record }),
     )
         .into_response()
+}
+
+/// GET /api/community/key/:cid — retrieve the group key for a private community.
+/// The key is returned as hex; the caller (founder or member) is expected to
+/// encrypt it for specific recipients using X25519+AES-GCM (seal_dm).
+async fn get_community_group_key(
+    State(state): State<Arc<AppState>>,
+    Path(cid): Path<String>,
+) -> impl IntoResponse {
+    let locked = *state.locked.read().await;
+    if locked {
+        return (
+            StatusCode::LOCKED,
+            Json(json!({ "error": "Identity is locked — unlock first" })),
+        ).into_response();
+    }
+
+    let keys = state.group_keys.read().await;
+    if let Some(key) = keys.get(&cid) {
+        (
+            StatusCode::OK,
+            Json(json!({ "community_cid": cid, "group_key": key })),
+        ).into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("No group key for community {}", cid) })),
+        ).into_response()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// dApp gossip records (payload.kind='dapp')
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct DappRegisterRequest {
+    name: String,
+    description: String,
+    version: String,
+    url: String,
+    icon: Option<String>,
+    /// CID of the dApp's source record (optional, for distributed installations)
+    source_cid: Option<String>,
+    /// Whether this dApp is encrypted/private
+    #[serde(default)]
+    is_encrypted: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DappRegisterResponse {
+    id: String,
+    record: records::BaseRecord,
+}
+
+/// POST /api/dapp/register — publish a `dapp` record for network discovery.
+/// The record's payload.kind='dapp' allows other nodes to discover this dApp
+/// via record gossip. The dApp source must be installed locally at /dapps/<name>.
+async fn register_dapp_endpoint(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let req: DappRegisterRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid request: {}", e) })),
+            )
+                .into_response()
+        }
+    };
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let sign_req = records::SignRequest {
+        r#type: "dapp".to_string(),
+        author: state.pub_key.clone(),
+        prev: None,
+        ts,
+        payload: json!({
+            "name": req.name,
+            "description": req.description,
+            "version": req.version,
+            "url": req.url,
+            "kind": "dapp",
+            "is_encrypted": req.is_encrypted,
+            "source_cid": req.source_cid,
+            "icon": req.icon,
+        }),
+    };
+
+    let kp = match get_keypair_or_locked(&state).await {
+        Ok(k) => k,
+        Err(e) => return e.into_response(),
+    };
+
+    let record = records::BaseRecord::from_sign_request(&sign_req, &kp);
+    let id = record.id.clone();
+    let canonical = record.to_canonical_json().unwrap_or_default();
+    state.store.put_record(&id, canonical.as_bytes()).ok();
+
+    let mut known = state.known_records.write().await;
+    known.insert(id.clone(), record.clone());
+    drop(known);
+
+    if let Some(p2p) = state.p2p.read().await.as_ref() {
+        p2p.publish_record(canonical.as_bytes().to_vec());
+    }
+    emit(&state, json!({ "type": "record", "record": &record }));
+
+    (
+        StatusCode::CREATED,
+        Json(DappRegisterResponse { id, record }),
+    )
+        .into_response()
+}
+
+/// GET /api/dapp/discover — list all dApp records discovered via gossip.
+async fn discover_dapps(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let known = state.known_records.read().await;
+    let dapps: Vec<serde_json::Value> = known
+        .values()
+        .filter(|r| matches!(r.r#type, records::RecordType::Dapp))
+        .map(|r| {
+            let mut payload = r.payload.clone();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("id".to_string(), serde_json::json!(r.id));
+                obj.insert("author".to_string(), serde_json::json!(r.author));
+                obj.insert("ts".to_string(), serde_json::json!(r.ts));
+            }
+            payload
+        })
+        .collect();
+    drop(known);
+
+    Json(json!({ "dapps": dapps, "count": dapps.len() }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2151,6 +2452,70 @@ async fn chain_anchor(
     }
 }
 
+#[derive(Deserialize)]
+struct AnchorPayloadRequest {
+    author: String,
+    record_cid: Option<String>,
+    ts: u64,
+    sig: Option<String>,
+    payload_data: String,
+    content_type: String,
+}
+
+/// POST /api/chain/anchor-payload — anchor a record with embedded payload data.
+/// For text + small media (< 100 KB threshold), the payload is stored directly
+/// in the block transaction instead of just the CID.
+async fn chain_anchor_payload(
+    State(state): State<Arc<AppState>>,
+    bytes: axum::body::Bytes,
+) -> impl IntoResponse {
+    let chain = match &state.chain {
+        Some(c) => c,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "anchor chain not enabled (DDN_ENABLE_CHAIN=1)" })),
+            ).into_response();
+        }
+    };
+
+    let req: AnchorPayloadRequest = match serde_json::from_slice(&bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid request: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    if req.payload_data.len() as u64 > chain::MAX_EMBEDDED_PAYLOAD {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": format!("payload exceeds max embedded size of {} bytes", chain::MAX_EMBEDDED_PAYLOAD) })),
+        ).into_response();
+    }
+
+    if chain
+        .anchor_payload(
+            &req.author,
+            req.record_cid.as_deref().unwrap_or("payload-only"),
+            req.ts,
+            req.sig.as_deref().unwrap_or(""),
+            req.payload_data,
+            req.content_type,
+        )
+        .await
+    {
+        (StatusCode::ACCEPTED, Json(json!({ "status": "anchoring" }))).into_response()
+    } else {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to queue anchor" })),
+        ).into_response()
+    }
+}
+
 async fn chain_block(
     State(state): State<Arc<AppState>>,
     Path(height): Path<u64>,
@@ -2230,6 +2595,111 @@ async fn chain_validators(State(state): State<Arc<AppState>>) -> impl IntoRespon
         StatusCode::OK,
         Json(json!({ "validators": chain.validators() })),
     )
+}
+
+/// GET /api/chain/proposals — list blocks awaiting signatures from validators.
+async fn chain_proposals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let chain = match &state.chain {
+        Some(c) => c,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "anchor chain not enabled" })),
+            );
+        }
+    };
+
+    let pending = chain.pending_block_proposals().await;
+    (StatusCode::OK, Json(json!({ "proposals": pending })))
+}
+
+/// POST /api/chain/sign — a validator signs a block proposal by hash.
+/// Body: { block_hash: "<hash>" }
+#[derive(Deserialize)]
+struct SignBlockRequest {
+    block_hash: String,
+}
+
+async fn chain_sign_block(
+    State(state): State<Arc<AppState>>,
+    bytes: axum::body::Bytes,
+) -> impl IntoResponse {
+    let locked = *state.locked.read().await;
+    if locked {
+        return (
+            StatusCode::LOCKED,
+            Json(json!({ "error": "Identity is locked — unlock first" })),
+        ).into_response();
+    }
+
+    let chain = match &state.chain {
+        Some(c) => c,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "anchor chain not enabled" })),
+            ).into_response();
+        }
+    };
+
+    let req: SignBlockRequest = match serde_json::from_slice(&bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid request: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    let kp = match get_keypair_or_locked(&state).await {
+        Ok(k) => k,
+        Err(e) => return e.into_response(),
+    };
+
+    let sig = chain.sign_block(&kp, &req.block_hash);
+    (StatusCode::OK, Json(json!({ "signature": sig }))).into_response()
+}
+
+/// POST /api/chain/commit — submit a block (possibly with additional signatures) for validation and commit.
+/// Body: { block: <Block JSON> }
+#[derive(Deserialize)]
+struct CommitBlockRequest {
+    block: chain::Block,
+}
+
+async fn chain_commit(
+    State(state): State<Arc<AppState>>,
+    bytes: axum::body::Bytes,
+) -> impl IntoResponse {
+    let chain = match &state.chain {
+        Some(c) => c,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "anchor chain not enabled" })),
+            ).into_response();
+        }
+    };
+
+    let req: CommitBlockRequest = match serde_json::from_slice(&bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid request: {}", e) })),
+            ).into_response();
+        }
+    };
+
+    match chain.commit_block(req.block).await {
+        true => (StatusCode::OK, Json(json!({ "status": "committed" }))),
+        false => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "block validation failed or already committed" })),
+        ),
+    }
+    .into_response()
 }
 
 /// GET /ws/events (upgraded) — push channel for browsers: gossip records,

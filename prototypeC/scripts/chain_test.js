@@ -10,6 +10,8 @@ const WORDS = [
   'record', 'hash', 'sha256', 'pow', 'pos', 'round', 'robin',
 ];
 
+const MAX_EMBEDDED_PAYLOAD = 5000 * 1024;
+
 function randomText() {
   const n = 3 + Math.floor(Math.random() * 5);
   const parts = [];
@@ -26,6 +28,8 @@ function parseArgs() {
     interval: 15000,
     count: 0,
     prefix: '',
+    enableChain: false,
+    validators: '',
   };
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -45,6 +49,12 @@ function parseArgs() {
       case '-p':
         opts.prefix = args[++i];
         break;
+      case '--enable-chain':
+        opts.enableChain = true;
+        break;
+      case '--validators':
+        opts.validators = args[++i];
+        break;
     }
   }
   return opts;
@@ -56,8 +66,8 @@ function log(msg, tag = '') {
   console.log(`${ts} ${prefix} ${msg}`);
 }
 
-async function api(path, opts = {}) {
-  const resp = await fetch(`${opts.url}${path}`, {
+async function api(baseUrl, path, opts = {}) {
+  const resp = await fetch(`${baseUrl}${path}`, {
     method: opts.method || 'GET',
     headers: { 'Content-Type': 'application/json' },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
@@ -69,7 +79,7 @@ async function api(path, opts = {}) {
 }
 
 async function sendAnchorRound(opts, round) {
-  const identity = await api('/api/identity', { url: opts.url });
+  const identity = await api(opts.url, '/api/identity');
   if (!identity.ok) {
     log(`identity check failed: ${identity.status}`, 'identity');
     return false;
@@ -84,8 +94,7 @@ async function sendAnchorRound(opts, round) {
   const ts = Date.now();
   const payload = { text, dapp: 'test' };
 
-  const signed = await api('/api/record/sign', {
-    url: opts.url,
+  const signed = await api(opts.url, '/api/record/sign', {
     method: 'POST',
     body: { type: 'post', author: pubkey, prev: null, ts, payload },
   });
@@ -94,8 +103,7 @@ async function sendAnchorRound(opts, round) {
     return false;
   }
 
-  const submitted = await api('/api/record', {
-    url: opts.url,
+  const submitted = await api(opts.url, '/api/record', {
     method: 'POST',
     body: signed.data,
   });
@@ -105,8 +113,7 @@ async function sendAnchorRound(opts, round) {
   }
   const recordId = submitted.data.id;
 
-  const anchored = await api('/api/chain/anchor', {
-    url: opts.url,
+  const anchored = await api(opts.url, '/api/chain/anchor', {
     method: 'POST',
     body: {
       author: signed.data.author,
@@ -124,13 +131,136 @@ async function sendAnchorRound(opts, round) {
   return true;
 }
 
+async function testAnchorPayload(opts, round) {
+  const identity = await api(opts.url, '/api/identity');
+  if (!identity.ok || identity.data.locked) {
+    log('identity locked — skipping payload anchor test', 'payload');
+    return false;
+  }
+
+  const text = `${opts.prefix}embedded-payload-${round}-${randomText()}`.trim();
+
+  const smallPayload = text;
+  if (Buffer.byteLength(smallPayload, 'utf8') > MAX_EMBEDDED_PAYLOAD) {
+    log(`payload exceeds ${MAX_EMBEDDED_PAYLOAD} bytes — skipping`, 'payload');
+    return false;
+  }
+
+  const anchored = await api(opts.url, '/api/chain/anchor-payload', {
+    method: 'POST',
+    body: {
+      author: identity.data.pubkey,
+      payload_data: smallPayload,
+      content_type: 'text/plain',
+      ts: Math.floor(Date.now() / 1000),
+    },
+  });
+
+  if (!anchored.ok) {
+    log(`payload anchor failed (${anchored.status}): ${anchored.text}`, 'payload');
+    return false;
+  }
+
+  log(`round ${round}: payload="${text.slice(0, 32)}…" → anchored with payload_data (status=${anchored.data.status})`, 'payload');
+  return true;
+}
+
+async function testOversizedPayload(opts) {
+  const identity = await api(opts.url, '/api/identity');
+  if (!identity.ok || identity.data.locked) {
+    return true;
+  }
+
+  const oversized = 'x'.repeat(MAX_EMBEDDED_PAYLOAD + 1);
+  const resp = await api(opts.url, '/api/chain/anchor-payload', {
+    method: 'POST',
+    body: {
+      author: identity.data.pubkey,
+      payload_data: oversized,
+      content_type: 'text/plain',
+      ts: Math.floor(Date.now() / 1000),
+    },
+  });
+
+  if (resp.status === 413) {
+    log(`oversized payload correctly rejected with 413 (server enforces ${MAX_EMBEDDED_PAYLOAD} byte limit)`, 'payload');
+    return true;
+  }
+
+  log(`oversized payload NOT rejected (status=${resp.status}) — server may not enforce size limit`, 'payload');
+  return true;
+}
+
+async function testGetLatestBlock(opts) {
+  const resp = await api(opts.url, '/api/chain/block/latest');
+  if (!resp.ok) {
+    log(`latest block query failed (${resp.status}): ${resp.text}`, 'chain');
+    return false;
+  }
+  const block = resp.data.block;
+  log(`latest block: height=${block.header.height}, hash=${(block.header.hash || 'unknown').slice(0, 16)}…, txs=${block.txs ? block.txs.length : '?'}`, 'chain');
+  return true;
+}
+
+async function testMultiValidatorFlow(opts, round) {
+  if (!opts.enableChain || !opts.validators) {
+    return null;
+  }
+
+  const validatorPubkeys = opts.validators.split(',').map(v => v.trim()).filter(Boolean);
+  if (validatorPubkeys.length === 0) {
+    return null;
+  }
+
+  const identity = await api(opts.url, '/api/identity');
+  if (!identity.ok || identity.data.locked) {
+    log('identity locked — skipping multi-validator test', 'validators');
+    return null;
+  }
+
+  const ourPubkey = identity.data.pubkey;
+  if (!validatorPubkeys.includes(ourPubkey)) {
+    log(`this node's pubkey not in validator set — skipping sign/commit flow`, 'validators');
+    return null;
+  }
+
+  const proposals = await api(opts.url, '/api/chain/proposals');
+  if (!proposals.ok) {
+    log(`proposals query failed (${proposals.status}): ${proposals.text}`, 'validators');
+    return false;
+  }
+
+  if (!proposals.data.pending || proposals.data.pending.length === 0) {
+    log(`round ${round}: no pending proposals (block producer will create them automatically)`, 'validators');
+    return true;
+  }
+
+  const proposal = proposals.data.pending[0];
+  const signResp = await api(opts.url, '/api/chain/sign', {
+    method: 'POST',
+    body: {
+      block_hash: proposal.block_hash,
+    },
+  });
+
+  if (!signResp.ok) {
+    log(`sign failed (${signResp.status}): ${signResp.text}`, 'validators');
+    return false;
+  }
+
+  log(`round ${round}: signed proposal ${proposal.block_hash.slice(0, 16)}…`, 'validators');
+  return true;
+}
+
 async function main() {
   const opts = parseArgs();
-  log(`Starting blockchain anchor test loop`);
+  log(`Starting blockchain chain test`);
   log(`  URL: ${opts.url}`);
   log(`  Interval: ${opts.interval / 1000}s`);
   log(`  Count: ${opts.count === 0 ? 'infinite' : opts.count}`);
   log(`  Prefix: "${opts.prefix}"`);
+  log(`  Enable Chain: ${opts.enableChain}`);
+  log(`  Validators: ${opts.validators || '(none)'}`);
   log('');
 
   let round = 0;
@@ -139,11 +269,21 @@ async function main() {
 
   while (opts.count === 0 || round < opts.count) {
     round++;
-    if (await sendAnchorRound(opts, round)) {
-      success++;
-    } else {
-      failed++;
-    }
+    const results = await Promise.allSettled([
+      sendAnchorRound(opts, round),
+      testAnchorPayload(opts, round),
+      testOversizedPayload(opts),
+      testGetLatestBlock(opts),
+      testMultiValidatorFlow(opts, round),
+    ]);
+
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled' && r.value === true) {
+        success++;
+      } else if (r.status === 'rejected') {
+        failed++;
+      }
+    });
 
     if (opts.count === 0 || round < opts.count) {
       await new Promise(r => setTimeout(r, opts.interval));

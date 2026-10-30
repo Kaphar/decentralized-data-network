@@ -186,12 +186,14 @@ export interface ModActionRequest {
 export interface CommunityCreateRequest {
   name: string;
   description: string;
+  is_private?: boolean;
 }
 
 export interface CommunityMembershipRequest {
   community_cid: string;
   target_pubkey: string;
   role: string;
+  encrypted_group_key?: string;
 }
 
 export interface CommunityInfoResponse {
@@ -201,6 +203,12 @@ export interface CommunityInfoResponse {
   moderators: string[];
   blocked_cids: string[];
   hidden_cids: string[];
+  is_private?: boolean;
+  members?: string[];
+}
+
+export interface CommunityKeyResponse {
+  key: string;
 }
 
 export interface ModerationResponse {
@@ -225,11 +233,19 @@ export interface ChainTx {
   record_cid: string;
   ts: number;
   sig: string;
+  payload_data?: string;
+  content_type?: string;
 }
 
 export interface ChainBlock {
   header: ChainBlockHeader;
   txs: ChainTx[];
+  signatures?: BlockSignature[];
+}
+
+export interface BlockSignature {
+  validator_cid: string;
+  signature: string;
 }
 
 export interface AnchorTxInput {
@@ -303,4 +319,65 @@ export interface DappManifest {
   icon?: string;
   routes?: string[];
   permissions?: string[];
+}
+
+export interface DappInfo {
+  cid: string;
+  name: string;
+  description?: string;
+  path?: string;
+  manifest?: DappManifest;
+}
+
+export interface DappListResponse {
+  dapps: DappInfo[];
+}
+
+export interface DappRegisterRequest {
+  cid: string;
+  name: string;
+  path?: string;
+  manifest?: DappManifest;
+}
+
+export interface SetDappsDirRequest {
+  dir: string;
+}
+
+export interface DappInstallRequest {
+  source: string;
+  name: string;
+}
+
+export interface PendingBlock {
+  block_hash: string;
+  proposer: string;
+  height: number;
+  signature?: string;
+  timestamp: number;
+}
+
+export interface ProposalsResponse {
+  pending: PendingBlock[];
+}
+
+export interface ProposeBlockRequest {
+  author: string;
+  tx: ChainTx;
+}
+
+export interface ProposeBlockResponse {
+  block_id: string;
+  status: string;
+}
+
+export interface SignBlockRequest {
+  proposer: string;
+  block_hash: string;
+  signature: string | null;
+}
+
+export interface CommitBlockRequest {
+  block_hash: string;
+  signatures: Array<{ validator: string; signature: string }>;
 }

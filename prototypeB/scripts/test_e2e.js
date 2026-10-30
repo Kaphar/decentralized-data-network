@@ -499,6 +499,106 @@ async function runTests() {
     log(`community blocked_cids: ${community.blocked_cids.length}`, 'detail');
   });
 
+   // ── Phase 6.3: Private Communities ────────────────────────────────
+  log('--- Phase 6.3: Private Community Model ---', 'test');
+
+  let privateCommunityId = '';
+
+  test('create a private community on node1', async () => {
+    const result = await api(PORT_1, '/api/community', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'Private Community',
+        description: 'E2E private community test',
+        is_private: true,
+      }),
+    });
+    privateCommunityId = result.id;
+    log(`private community created: id=${truncate(result.id, 32)}`, 'detail');
+    if (result.record.author !== id1.pubkey) throw new Error('Private community founder is not node1');
+    const p = result.record.payload;
+    if (p.is_private !== true) throw new Error('is_private flag not set on community record');
+  });
+
+  test('private community group key exists and is retrievable', async () => {
+    const keyResp = await api(PORT_1, `/api/community/key/${privateCommunityId}`, { method: 'POST' });
+    if (!keyResp.key || keyResp.key.length < 32) throw new Error('Group key missing or too short');
+    log(`group key retrieved (${keyResp.key.length} chars), first 8: ${keyResp.key.slice(0, 8)}…`, 'detail');
+  });
+
+  test('add node2 as private community member', async () => {
+    const result = await api(PORT_1, '/api/community/membership', {
+      method: 'POST',
+      body: JSON.stringify({
+        community_cid: privateCommunityId,
+        target_pubkey: id2.pubkey,
+        role: 'member',
+        encrypted_group_key: 'encrypted-key-for-node2',
+      }),
+    });
+    if (result.record.type !== 'community_membership') throw new Error('Record type is not community_membership');
+    log(`membership record: ${truncate(result.id, 32)}`, 'detail');
+  });
+
+  test('node2 can retrieve group key after membership', async () => {
+    const keyResp = await api(PORT_2, `/api/community/key/${privateCommunityId}`, { method: 'POST' });
+    if (!keyResp.key) throw new Error('node2 cannot retrieve group key after membership');
+    log(`node2 retrieved group key (${keyResp.key.length} chars)`, 'detail');
+  });
+
+  // ── Phase 6.4: dApp Registration & Discovery ──────────────────────
+  log('--- Phase 6.4: dApp Registration & Discovery ---', 'test');
+
+  test('register a dApp on node1', async () => {
+    const result = await api(PORT_1, '/api/dapp/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        cid: 'test-dapp-cid-123',
+        name: 'Test Guestbook',
+        description: 'A test dApp for e2e',
+        path: '/dapp/guestbook',
+        manifest: { name: 'guestbook', version: '1.0.0' },
+      }),
+    });
+    log(`dApp registered: name=${result.name}`, 'detail');
+    if (!result.success) throw new Error('dApp registration did not return success');
+  });
+
+  test('discover registered dApps on node1', async () => {
+    const dapps = await api(PORT_1, '/api/dapp/discover');
+    log(`discovered ${dapps.length} dApps on node1`, 'detail');
+    const found = dapps.dapps.some((d) => d.cid === 'test-dapp-cid-123');
+    if (!found) throw new Error('Registered dApp not found in discovery response');
+  });
+
+  test('node2 discovers dApp via gossip', async () => {
+    await api(PORT_2, '/api/sync', { method: 'POST' });
+    await sleep(SLOW ? 2000 : 300);
+    const dapps = await api(PORT_2, '/api/dapp/discover');
+    log(`discovered ${dapps.length} dApps on node2`, 'detail');
+    const found = dapps.dapps.some((d) => d.cid === 'test-dapp-cid-123');
+    if (!found) throw new Error('dApp not gossiped to node2');
+  });
+
+  // ── Phase 6.5: Runtime dApp Directory ─────────────────────────────
+  log('--- Phase 6.5: Runtime dApp Directory ---', 'test');
+
+  test('node1 accepts runtime dApp dir setting', async () => {
+    const customDir = path.join(os.tmpdir(), 'ddn-test-dapps');
+    const result = await api(PORT_1, '/api/dapps/dir', {
+      method: 'POST',
+      body: JSON.stringify({ dir: customDir }),
+    });
+    if (!result.success) throw new Error('Runtime dApp dir setting failed');
+    log(`dApp directory set to ${customDir}`, 'detail');
+  });
+
+  test('local dApp list reflects runtime dir change', async () => {
+    const localList = await api(PORT_1, '/api/dapps');
+    log(`local dApp list: ${localList.dapps ? localList.dapps.length : 0} dApps`, 'detail');
+    if (!Array.isArray(localList.dapps)) throw new Error('Local dApp list missing dapps array');
+  });
+
   log(`\n=== Results: ${passed} passed, ${failed} failed ===`, 'summary');
   return failed === 0;
 }

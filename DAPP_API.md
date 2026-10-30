@@ -44,6 +44,27 @@ cp -r mydapp-dist frontend/dist/dapps/myguestbook
 cargo run --release  # node serves from <frontend_path>/dapps/
 ```
 
+```bash
+# Option C: runtime install via API (requires unlocked identity)
+curl -X POST http://127.0.0.1:3000/api/dapps/install \
+  -H "Content-Type: application/json" \
+  -d '{"name":"myguestbook","source_path":"/home/user/mydapp-dist"}'
+# → { "status":"installed","name":"myguestbook","url":"/dapp/myguestbook" }
+```
+
+### 1.3 Runtime dApp directory management
+
+The node exposes a runtime dApp directory that can be changed without restart:
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/dapps` | List installed dApps. Returns `{ dapps: string[], dir: string }`. |
+| `POST` | `/api/dapps/install` | Body: `{ name, source_path }`. Copy a pre-built dist folder into the dApps dir. Requires unlocked identity. Returns `{ status, name, url }`. |
+| `POST` | `/api/dapps/dir` | Body: `{ path: "<absolute_path>" }`. Change the dApp directory at runtime. Requires unlocked identity. Returns `{ status, dir }`. |
+
+The dApp directory is initialized from `DDN_DAPPS_DIR` (env) or `<frontend_path>/dapps`
+(fallback). Use `POST /api/dapps/dir` to change it at runtime — no restart needed.
+
 ### 1.3 dApp manifest (optional convention)
 
 A dApp can optionally ship a `manifest.json` at its root. The node does **not**
@@ -80,21 +101,40 @@ const resp = await fetch(`${base}/api/wall`);
 When served from the node (`/dapp/:name`), `window.location.origin` is
 `http://127.0.0.1:<port>`, which is the correct node address.
 
-### 1.5 DApp Manager UI (proposed frontend feature)
+### 1.5 DApp Manager UI
 
-To let a **user** set up a dApp from a `dist` on their machine, the Tauri app can
-expose a "DApp Manager" page that:
+To let a **user** set up a dApp from a `dist` on their machine, the Tauri app exposes
+a "DApp Manager" page that:
 
-1. Calls `window.api.chooseFile()` (Tauri dialog plugin) to let the user pick a
-   `dist` folder.
-2. Copies the folder to `$DDN_DAPPS_DIR/<name>/`.
-3. If `DDN_DAPPS_DIR` wasn't set, writes it into `config.json` and restarts the
-   sidecar node.
-4. Shows the dApp at `http://127.0.0.1:<port>/dapp/<name>` (or embeds it in a WebView).
+1. Lets the user **browse for a folder** via Tauri's native file dialog (or type a path manually).
+2. Calls `POST /api/dapps/install` to copy the folder into the dApp directory at runtime — no node restart needed.
+3. Allows changing the dApp directory via `POST /api/dapps/dir`.
+4. Shows locally installed dApps and network-discovered dApps (registered as gossip records).
+5. Opens dApps in an **external browser** or an **in-app Tauri window** (user's choice).
 
-> This requires either a **new node endpoint** (`POST /api/dapps/install`) that
-> copies a folder at runtime, or a Tauri-side config change + sidecar restart.
-> See **Question 5** below.
+### 1.6 dApp Gossip Records
+
+dApps can be **registered on the network** as gossip records, allowing other nodes to discover them without manual installation.
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/api/dapp/register` | Body: `{ name, description, version, url, icon?, source_cid?, is_encrypted? }`. Publishes a `dapp`-type record. The record's `payload.kind='dapp'` allows discovery via record gossip. |
+| `GET` | `/api/dapp/discover` | Lists all dApp records discovered via gossip. Returns `{ dapps: DappInfo[], count }`. |
+
+**dApp record payload:**
+```json
+{
+  "kind": "dapp",
+  "name": "myguestbook",
+  "description": "Public message board",
+  "version": "1.0.0",
+  "url": "/dapp/myguestbook",
+  "is_encrypted": false,
+  "source_cid": "optional_cid_of_source_record"
+}
+```
+
+The DApp Manager UI shows both locally installed dApps and network-discovered dApps, and lets users open either in an external browser or an in-app Tauri window.
 
 ---
 
@@ -144,7 +184,7 @@ All endpoints are relative to `http://127.0.0.1:<DDN_HTTP_PORT>` (default `3000`
 ```json
 {
   "id": "<sha256_cid>",
-  "type": "post | comment | reaction | message | media_offer | report | mod_action | mod_grant | community | community_membership",
+  "type": "post | comment | reaction | message | media_offer | report | mod_action | mod_grant | community | community_membership | dapp",
   "author": "<ed25519_pubkey_hex>",
   "prev": "<cid_or_null>",
   "ts": 1728900000,
@@ -209,7 +249,7 @@ For large files (> 5 MB) or peer-to-peer transfer:
 | `POST` | `/api/media/offer` | Body: `{ to: <recipient_pubkey>, file_name, size_bytes, ephemeral_pubkey }`. Creates a media offer record. |
 | `POST` | `/api/media/accept` | Body: `{ offer_cid, ephemeral_pubkey }`. Accept a media offer, returns `{ id }`. |
 | `POST` | `/api/media/keypair` | Returns `{ pubkey, secret }` for a new WebRTC signaling keypair. |
-| `POST` | `/api/webrtc/signal` | Body: `{ payload: "<base64_json>" }`. Relay WebRTC SDP/answer/candidate between peers via the node. |
+| `POST` | `/api/media/signal`   | Body: `{ payload: "<base64_json>" }`. Relay WebRTC SDP/answer/candidate between peers via the node. |
 | `GET` | `/api/dm` | Fetch DMs sent to or from the current identity. Returns `{ messages: BaseRecord[] }`. |
 
 ### 2.7 E2EE Direct Messages (X25519 + AES-GCM)
@@ -248,50 +288,61 @@ The encrypted message is stored as a `message`-type record:
 { "target_cid": "<record_to_act_on>", "action": "hide|nuke", "mod_pubkey": "...", "community_cid": "..." }
 ```
 
-### 2.9 Communities
+### 2.9 Communities (with optional encryption)
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `POST` | `/api/community` | Body: `{ name, description }`. Creates a community record (signer becomes founder-moderator). Returns `{ id, record }`. |
+| `POST` | `/api/community` | Body: `{ name, description, is_private }`. Creates a community record (signer becomes founder-moderator). Returns `{ id, record }`. |
 | `GET` | `/api/community` | Lists all known community records. Returns `{ communities: BaseRecord[] }`. |
-| `POST` | `/api/community/membership` | Body: `{ community_cid, target_pubkey, role }`. Grants a role (e.g. `"moderator"`) to a member. Returns `{ id, record }`. |
+| `POST` | `/api/community/membership` | Body: `{ community_cid, target_pubkey, role, encrypted_group_key? }`. Grants a role (e.g. `"moderator"`) to a member. For private communities, includes the encrypted group key. Returns `{ id, record }`. |
+| `GET` | `/api/community/key/:cid` | Retrieve the group key for a private community. Requires unlocked identity. Returns `{ community_cid, group_key }`. |
+
+**Private communities:**
+
+- When `is_private: true`, the founder generates a random 32-byte group key (stored on the node).
+- The founder retrieves the group key via `GET /api/community/key/:cid`.
+- The founder encrypts the group key for each member using X25519+AES-GCM (`POST /api/dm/seal`), and includes the ciphertext in the membership record's `encrypted_group_key` field.
+- Members decrypt the group key with `POST /api/dm/open`.
+- All records in the community should have their payload encrypted with the group key (AES-256-GCM). The node stores encrypted records; decryption is client-side.
 
 ### 2.10 Anchor Blockchain (PoS Anchor Chain)
 
 > Requires `DDN_ENABLE_CHAIN=1` at node startup.
+> Configure validators via `DDN_VALIDATORS` env var (comma-separated pubkey CIDs).
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `POST` | `/api/chain/anchor` | Submit an AnchorTx. Body: `{ author, record_cid, ts, sig, payload?, media_cid_only?, encrypted?, community_cid?, to? }`. Returns `202` + `{ status: "anchoring" }` (queued) or `201` (committed). |
-| `GET` | `/api/chain/block/:height` | Fetch block at height. Returns `{ block: { header, txs } }`. |
+| `POST` | `/api/chain/anchor` | Submit an AnchorTx (CID-only anchor). Body: `{ author, record_cid, ts, sig }`. Returns `202` + `{ status: "anchoring" }`. |
+| `POST` | `/api/chain/anchor-payload` | Submit an AnchorTx with embedded payload data (for records < 100 KB). Body: `{ author, record_cid, ts, sig, payload_data, content_type }`. Returns `202` + `{ status: "anchoring" }`. `413` if payload > 100 KB. |
+| `GET` | `/api/chain/block/:height` | Fetch block at height. Returns `{ block: { header, txs, signatures } }`. |
 | `GET` | `/api/chain/block/latest` | Latest committed block. |
 | `GET` | `/api/chain/record/:cid` | Index lookup. Returns `{ cid, height, committed }`. |
-| `GET` | `/api/chain/validators` | List validator pubkeys. Returns `{ validators: string[] }`. |
-| `GET` | `/api/chain/votes/:height` | Validator signatures for a block (proof of 2/3 quorum). |
-| `GET` | `/api/chain/index?...` | Light index: `?dapp=<tag>&community_cid=<cid>&author=<pubkey>&encrypted=<bool>`. |
-| `GET` | `/api/chain/proof/:cid` | Merkle proof for a record_cid against a recent block. |
-| `POST` | `/api/chain/verify` | Verify an AnchorTx signature without anchoring. |
+| `GET` | `/api/chain/validators` | List validator pubkey CIDs. Returns `{ validators: string[] }`. |
+| `GET` | `/api/chain/proposals` | List blocks awaiting validator signatures. Returns `{ proposals: Block[] }`. |
+| `POST` | `/api/chain/sign` | Body: `{ block_hash }`. Validator signs a block proposal. Returns `{ validator_cid, signature }`. |
+| `POST` | `/api/chain/commit` | Body: `{ block }`. Submit a signed block for validation and commit. |
 
-**AnchorTx layout:**
+**Multi-validator consensus:**
+
+- The proposer for height N is `validators[N % len(validators)]`.
+- The proposer creates a block, self-signs it, and broadcasts it.
+- Other validators sign via `POST /api/chain/sign` and the block is committed when it has ≥ 2/3+1 signatures.
+- With a single validator, blocks are self-signed and committed immediately.
+
+**AnchorTx (with embedded payload):**
+
 ```rust
 struct AnchorTx {
     author: String,            // Ed25519 pubkey of the record author
-    record_cid: String,        // SHA-256 CID of the DDN record (the notary anchor)
+    record_cid: String,        // SHA-256 CID of the DDN record
     ts: u64,                   // Unix seconds
     sig: String,               // Ed25519 sig by `author` over (record_cid || ts)
-    // Content mode (one of these):
-    payload: Option<Value>,     // full payload for small/public records
-    media_cid_only: bool,       // true => payload is in CAS only (media case)
-    encrypted: Option<EncryptedEnvelope>,  // private records
-    community_cid: Option<String>,         // community-scoped
-    to: Option<String>,                     // recipient pubkey for u2u private
-}
-struct EncryptedEnvelope {
-    ciphertext: String,
-    nonce: String,
-    ephemeral_pubkey: String,
+    payload_data: Option<String>,  // embedded payload for text + small media (< 100 KB)
+    content_type: Option<String>,  // MIME type of embedded data
 }
 ```
+
+**MAX_EMBEDDED_PAYLOAD:** 100 KB (`102400` bytes). Media above this threshold must be anchored CID-only (via `POST /api/chain/anchor`).
 
 **Block layout:**
 ```rust
@@ -337,7 +388,7 @@ await fetch(`${API}/api/chain/anchor`, {
 | `GET /` | Serves `index.html` from the frontend dist. |
 | `GET /static/*` | Serves files from `<frontend_path>/` (dist directory). |
 | `GET /assets/*` | Serves files from `<frontend_path>/assets/`. |
-| `GET /dapps/*` | Serves built dApp files from `<frontend_path>/dapps/`. |
+| `GET /dapps/{*path}` | Serves dApp files from the **runtime-configured** dApp directory. |
 | `GET /dapp/:name` | Redirects to `/dapps/:name/index.html`. |
 | `GET /dapp/guestbook` | Standalone guestbook page (inline HTML in the node). |
 
