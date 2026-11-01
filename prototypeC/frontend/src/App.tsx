@@ -636,9 +636,9 @@ export default function App() {
             {/* <PeerManager onSync={handleSync} /> */}
             <Show when={initialLoad()} fallback={
               <>
-                <Show when={refreshing()}>
+                {/* <Show when={refreshing()}>
                   <div class="refresh-indicator">Updating...</div>
-                </Show>
+                </Show> */}
                 <PostList
                   records={records()}
                   hiddenCids={hiddenCids()}
