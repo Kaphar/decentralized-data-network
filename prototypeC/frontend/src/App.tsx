@@ -633,7 +633,7 @@ export default function App() {
               useWebRTC={useWebRTC()}
               onUseWebRTCChange={setUseWebRTC}
             />
-            <PeerManager onSync={handleSync} />
+            {/* <PeerManager onSync={handleSync} /> */}
             <Show when={initialLoad()} fallback={
               <>
                 <Show when={refreshing()}>
